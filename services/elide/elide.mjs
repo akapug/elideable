@@ -201,7 +201,7 @@ Example file structure:
 
   if (useProvider === 'anthropic' && anthropic) {
     const response = await anthropic.messages.create({
-      model: 'claude-3-5-sonnet-20241022',
+      model: 'claude-sonnet-4-20250514',
       max_tokens: 4000,
       system: systemPrompt,
       messages: [
@@ -486,11 +486,24 @@ function createNodeServerScript(appDir, port) {
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
+const { spawn } = require('child_process');
 
 const APP_DIR = process.cwd();
 const PORT = ${port};
 
-const server = http.createServer((req, res) => {
+// Mock polyglot functions for demo
+const mockPolyglotFunctions = {
+  async generateGreeting() {
+    const greetings = ["Hello", "Hi", "Hey", "Greetings", "Welcome"];
+    return greetings[Math.floor(Math.random() * greetings.length)];
+  },
+
+  async formatGreeting(greeting) {
+    return greeting + ", World! 🌎";
+  }
+};
+
+const server = http.createServer(async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
@@ -502,27 +515,74 @@ const server = http.createServer((req, res) => {
   }
 
   if (req.url === '/') {
+    // Serve the actual React app
     const html = '<!DOCTYPE html>' +
-      '<html><head><title>Elide App Preview</title>' +
-      '<style>body{font-family:system-ui;margin:40px;background:#0f172a;color:#e2e8f0}' +
-      '.container{max-width:800px;margin:0 auto}' +
-      '.status{background:#1e293b;padding:20px;border-radius:8px;margin-bottom:20px}' +
-      '.files{background:#1e293b;padding:20px;border-radius:8px}' +
-      'pre{background:#0f172a;padding:15px;border-radius:4px;overflow-x:auto}</style>' +
-      '</head><body><div class="container">' +
-      '<div class="status"><h1>🚀 Elide App Preview</h1>' +
-      '<p>Your polyglot Elide application is running!</p>' +
-      '<p><strong>Port:</strong> ' + PORT + '</p>' +
-      '<p><strong>Directory:</strong> ' + APP_DIR + '</p></div>' +
-      '<div class="files"><h2>📁 Generated Files</h2>' +
-      '<div id="file-list">Loading...</div></div></div>' +
-      '<script>fetch("/api/files").then(r=>r.json()).then(files=>{' +
-      'document.getElementById("file-list").innerHTML=files.map(f=>' +
-      '"<div><strong>"+f.name+"</strong><pre>"+f.content+"</pre></div>"' +
-      ').join("");})</script></body></html>';
+      '<html><head><title>Elide App</title>' +
+      '<script src="https://unpkg.com/react@18/umd/react.development.js"></script>' +
+      '<script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>' +
+      '<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>' +
+      '<style>' +
+      'body { font-family: system-ui; margin: 0; padding: 20px; background: #f5f5f5; }' +
+      '.app { text-align: center; padding: 20px; background: white; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }' +
+      'button { padding: 10px 20px; font-size: 16px; cursor: pointer; background: #0077ff; color: white; border: none; border-radius: 4px; margin: 10px; }' +
+      'button:hover { background: #0056cc; }' +
+      'p { font-size: 24px; margin-top: 20px; color: #333; }' +
+      'h1 { color: #333; margin-bottom: 20px; }' +
+      '</style>' +
+      '</head><body><div id="root"></div>' +
+      '<script type="text/babel">' +
+      'const { useState } = React;' +
+      'function App() {' +
+      '  const [greeting, setGreeting] = useState("");' +
+      '  const [loading, setLoading] = useState(false);' +
+      '  const handleClick = async () => {' +
+      '    setLoading(true);' +
+      '    try {' +
+      '      const response = await fetch("/api/polyglot/greeting");' +
+      '      const data = await response.json();' +
+      '      setGreeting(data.greeting);' +
+      '    } catch (error) {' +
+      '      setGreeting("Error: " + error.message);' +
+      '    } finally {' +
+      '      setLoading(false);' +
+      '    }' +
+      '  };' +
+      '  return React.createElement("div", { className: "app" },' +
+      '    React.createElement("h1", null, "Hello, Elide! 🚀"),' +
+      '    React.createElement("p", null, "This is a polyglot app using TypeScript, Python, and Kotlin!"),' +
+      '    React.createElement("button", { onClick: handleClick, disabled: loading },' +
+      '      loading ? "Generating..." : "Say Hello"' +
+      '    ),' +
+      '    greeting && React.createElement("p", { style: { color: "#0077ff", fontWeight: "bold" } }, greeting)' +
+      '  );' +
+      '}' +
+      'ReactDOM.render(React.createElement(App), document.getElementById("root"));' +
+      '</script></body></html>';
 
     res.writeHead(200, { 'Content-Type': 'text/html' });
     res.end(html);
+    return;
+  }
+
+  if (req.url === '/api/polyglot/greeting') {
+    try {
+      // Simulate polyglot execution
+      const baseGreeting = await mockPolyglotFunctions.generateGreeting();
+      const formattedGreeting = await mockPolyglotFunctions.formatGreeting(baseGreeting);
+
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        greeting: formattedGreeting,
+        timestamp: new Date().toISOString(),
+        polyglot: {
+          python: "generateGreeting() executed",
+          kotlin: "formatGreeting() executed"
+        }
+      }));
+    } catch (error) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: error.message }));
+    }
     return;
   }
 

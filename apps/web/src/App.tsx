@@ -122,7 +122,7 @@ export default function App() {
     { id: 'microsoft/phi-3-mini-128k-instruct:free', name: 'Phi-3 Mini (Free)', provider: 'OpenRouter' },
     { id: 'google/gemini-flash-1.5:free', name: 'Gemini 1.5 Flash (Free)', provider: 'OpenRouter' },
     // Direct API Models
-    { id: 'claude-3-5-sonnet-20241022', name: 'Claude 3.5 Sonnet', provider: 'Anthropic Direct' },
+    { id: 'claude-sonnet-4-20250514', name: 'Claude 4.0 Sonnet', provider: 'Anthropic Direct' },
     { id: 'claude-3-5-haiku-20241022', name: 'Claude 3.5 Haiku', provider: 'Anthropic Direct' },
     { id: 'gemini-1.5-flash', name: 'Gemini 1.5 Flash', provider: 'Google Direct' },
     { id: 'gemini-1.5-pro', name: 'Gemini 1.5 Pro', provider: 'Google Direct' },

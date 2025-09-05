@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Working Elide App Demo</title>
+    <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <style>
+        body { 
+            font-family: system-ui; 
+            margin: 0; 
+            padding: 20px; 
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+        }
+        .app { 
+            text-align: center; 
+            padding: 40px; 
+            background: white; 
+            border-radius: 12px; 
+            box-shadow: 0 8px 32px rgba(0,0,0,0.1);
+            max-width: 600px;
+            margin: 0 auto;
+        }
+        h1 { 
+            color: #333; 
+            margin-bottom: 10px;
+            font-size: 2.5em;
+        }
+        .subtitle {
+            color: #666;
+            margin-bottom: 30px;
+            font-size: 1.1em;
+        }
+        button { 
+            padding: 12px 24px; 
+            font-size: 16px; 
+            cursor: pointer; 
+            background: linear-gradient(45deg, #667eea, #764ba2);
+            color: white; 
+            border: none; 
+            border-radius: 8px; 
+            margin: 10px;
+            transition: all 0.3s ease;
+            font-weight: 600;
+        }
+        button:hover { 
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+        }
+        button:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+            transform: none;
+        }
+        .greeting { 
+            font-size: 24px; 
+            margin-top: 30px; 
+            color: #333;
+            padding: 20px;
+            background: #f8f9fa;
+            border-radius: 8px;
+            border-left: 4px solid #667eea;
+        }
+        .polyglot-info {
+            margin-top: 20px;
+            padding: 15px;
+            background: #e3f2fd;
+            border-radius: 8px;
+            font-size: 14px;
+            color: #1565c0;
+        }
+        .loading {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            border: 3px solid #f3f3f3;
+            border-top: 3px solid #667eea;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin-right: 10px;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+    <script type="text/babel">
+        const { useState } = React;
+        
+        function App() {
+            const [greeting, setGreeting] = useState("");
+            const [loading, setLoading] = useState(false);
+            const [polyglotInfo, setPolyglotInfo] = useState(null);
+            
+            const handleClick = async () => {
+                setLoading(true);
+                setGreeting("");
+                setPolyglotInfo(null);
+                
+                try {
+                    // Simulate polyglot execution
+                    await new Promise(resolve => setTimeout(resolve, 1000));
+                    
+                    // Mock Python function: generateGreeting()
+                    const pythonGreetings = ["Hello", "Hi", "Hey", "Greetings", "Welcome", "Salutations"];
+                    const baseGreeting = pythonGreetings[Math.floor(Math.random() * pythonGreetings.length)];
+                    
+                    // Mock Kotlin function: formatGreeting()
+                    const formattedGreeting = `${baseGreeting}, World! 🌎✨`;
+                    
+                    setGreeting(formattedGreeting);
+                    setPolyglotInfo({
+                        python: `generateGreeting() → "${baseGreeting}"`,
+                        kotlin: `formatGreeting() → "${formattedGreeting}"`,
+                        typescript: "React UI rendering complete"
+                    });
+                } catch (error) {
+                    setGreeting("Error: " + error.message);
+                } finally {
+                    setLoading(false);
+                }
+            };
+            
+            return React.createElement("div", { className: "app" },
+                React.createElement("h1", null, "🚀 Elide Polyglot App"),
+                React.createElement("div", { className: "subtitle" }, 
+                    "TypeScript + Python + Kotlin working together!"
+                ),
+                React.createElement("button", { 
+                    onClick: handleClick, 
+                    disabled: loading 
+                },
+                    loading && React.createElement("span", { className: "loading" }),
+                    loading ? "Executing Polyglot Functions..." : "Generate Greeting"
+                ),
+                greeting && React.createElement("div", { className: "greeting" }, greeting),
+                polyglotInfo && React.createElement("div", { className: "polyglot-info" },
+                    React.createElement("strong", null, "Polyglot Execution Log:"),
+                    React.createElement("br"),
+                    React.createElement("div", null, "🐍 Python: " + polyglotInfo.python),
+                    React.createElement("div", null, "🏗️ Kotlin: " + polyglotInfo.kotlin),
+                    React.createElement("div", null, "⚛️ TypeScript: " + polyglotInfo.typescript)
+                )
+            );
+        }
+        
+        ReactDOM.render(React.createElement(App), document.getElementById("root"));
+    </script>
+</body>
+</html>
