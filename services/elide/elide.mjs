@@ -251,28 +251,22 @@ async function generatePlan(prompt, model = null) {
     }
   }
 
-  const systemPrompt = `You are an expert Elide polyglot app builder. Elide is a high-performance polyglot runtime that supports JavaScript, TypeScript, Python, Kotlin, and Java in the same project.
-
-Given a user's description, create a detailed plan for building their app using Elide's polyglot capabilities.
+  const systemPrompt = `You are an expert polyglot developer using Elide runtime. Create working applications that leverage multiple programming languages in a single codebase.
 
 ELIDE CAPABILITIES:
-- JavaScript/TypeScript: Frontend components, Node.js-compatible APIs
-- Python: Data processing, ML/AI, scientific computing, text analysis
+- JavaScript/TypeScript: Frontend components, API interfaces, utilities
+- Python: Data processing, ML/AI, text analysis, scientific computing
 - Kotlin: High-performance business logic, type-safe operations
 - Java: Enterprise integrations, complex algorithms
-- Mix languages in the same project for optimal performance
+- All languages can interoperate seamlessly in the same application
 
-RESPONSE FORMAT - JSON object containing:
-- summary: Brief description highlighting which languages you'll use and why
-- files: Array of files with polyglot code (mix JS/TS/Python/Kotlin as appropriate)
-- technologies: List of Elide-supported technologies
+LANGUAGE SELECTION STRATEGY:
+- TypeScript: React components, type definitions, frontend logic
+- Python: Data manipulation, AI/ML, text processing, algorithms
+- Kotlin: Business rules, validation, performance-critical operations
+- JavaScript: Utilities, Node.js compatibility, simple functions
 
-BEST PRACTICES:
-- Use Python for data processing, text analysis, ML tasks
-- Use TypeScript for React components and frontend logic
-- Use Kotlin for performance-critical backend operations
-- Create realistic, working polyglot applications
-- Include proper imports and Elide-compatible code
+Create a complete working application with multiple files using different languages as appropriate.
 
 Example file structure:
 - App.tsx (React frontend)
@@ -285,7 +279,7 @@ Example file structure:
   if (useProvider === 'anthropic' && anthropic) {
     const response = await anthropic.messages.create({
       model: 'claude-sonnet-4-20250514',
-      max_tokens: 4000,
+      max_tokens: 8000,  // Increased for large responses
       system: systemPrompt,
       messages: [
         { role: 'user', content: prompt }
@@ -298,7 +292,13 @@ Example file structure:
     const result = await geminiModel.generateContent(fullPrompt);
     const response = await result.response;
     text = response.text();
-  } else if (useProvider === 'openrouter' && openrouterKey) {
+  } else if (useProvider === 'openrouter') {
+    if (!openrouterKey) {
+      throw new Error('OpenRouter API key not configured. Please set OPENROUTER_API_KEY in your .env file.');
+    }
+
+    console.log(`[ai] Making OpenRouter request with model: ${model || 'google/gemini-2.0-flash-exp:free'}`);
+
     const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
       method: 'POST',
       headers: {
@@ -314,19 +314,23 @@ Example file structure:
           { role: 'user', content: prompt }
         ],
         max_tokens: 4000,
-        temperature: 0.7
+        temperature: 0.7,
+        response_format: { type: 'json_object' }
       })
     });
 
     if (!response.ok) {
-      throw new Error(`OpenRouter API error: ${response.status}`);
+      const errorText = await response.text();
+      console.error(`[ai] OpenRouter API error: ${response.status} - ${errorText}`);
+      throw new Error(`OpenRouter API error: ${response.status} - ${errorText}`);
     }
 
     const data = await response.json();
+    console.log(`[ai] OpenRouter response received, choices: ${data.choices?.length}`);
     text = data.choices[0].message.content;
   }
 
-  // Parse JSON response - handle Claude 4.0 Sonnet's complex format
+  // Parse JSON response - robust handling for Claude 4.0 Sonnet and all models
   try {
     let parsed = null;
     let diffs = [];
@@ -336,6 +340,8 @@ Example file structure:
       console.log('Invalid or empty response text');
       return { plan: { message: 'No response received', prompt }, diffs: [] };
     }
+
+    console.log(`Response length: ${text.length} characters`);
 
     // Check if response is ONLY markdown code blocks (not JSON structure)
     if (text.includes('```') && !text.includes('```json') && !text.includes('"files"') && !text.includes('"name"')) {
@@ -412,6 +418,75 @@ Example file structure:
       }
     }
 
+    // CRITICAL: Handle raw JSON responses (Claude 4.0 Sonnet's main format)
+    if (!parsed && !text.includes('```json')) {
+      console.log('No code blocks found, attempting to parse raw JSON...');
+      try {
+        parsed = JSON.parse(text);
+        console.log('✅ Successfully parsed raw JSON');
+      } catch (rawError) {
+        console.log(`❌ Raw JSON parse failed: ${rawError.message}`);
+
+        // Handle truncated JSON (very common with Claude 4.0 Sonnet)
+        if (rawError.message.includes('Unexpected end') || rawError.message.includes('Expected')) {
+          console.log('🔧 Attempting to fix truncated JSON...');
+
+          // Find the last complete file entry
+          const lastFileEnd = text.lastIndexOf('    }');
+          if (lastFileEnd > 0) {
+            let fixedText = text.substring(0, lastFileEnd + 5);
+
+            // Close the JSON structure properly
+            if (!fixedText.includes('],')) {
+              fixedText += '\n  ],\n  "technologies": ["react", "typescript", "python", "kotlin"]\n}';
+            }
+
+            try {
+              parsed = JSON.parse(fixedText);
+              console.log('✅ Successfully parsed fixed truncated JSON');
+            } catch (fixError) {
+              console.log(`❌ Failed to fix truncated JSON: ${fixError.message}`);
+            }
+          }
+        }
+
+        // If still no parsed data, use regex extraction on raw text
+        if (!parsed) {
+          console.log('🔍 Using regex extraction on raw JSON...');
+
+          const rawFilePattern = /"path":\s*"([^"]+)"[\s\S]*?"content":\s*"((?:[^"\\]|\\.)*)"/g;
+          let match;
+          while ((match = rawFilePattern.exec(text)) !== null) {
+            const fileName = match[1];
+            let content = match[2];
+
+            // Comprehensive unescaping
+            content = content
+              .replace(/\\n/g, '\n')
+              .replace(/\\t/g, '\t')
+              .replace(/\\r/g, '\r')
+              .replace(/\\"/g, '"')
+              .replace(/\\\\/g, '\\');
+
+            diffs.push({
+              name: fileName,
+              content: content
+            });
+          }
+
+          if (diffs.length > 0) {
+            console.log(`✅ Extracted ${diffs.length} files from raw JSON using regex`);
+
+            // Create parsed object for summary
+            const summaryMatch = text.match(/"summary":\s*"([^"]*)"/);
+            parsed = {
+              summary: summaryMatch ? summaryMatch[1] : "Polyglot app created successfully"
+            };
+          }
+        }
+      }
+    }
+
     // If we still don't have parsed data, try the old method
     if (!parsed) {
       const cleanedText = text.replace(/`([^`]*)`/gs, (match, content) => {
@@ -432,12 +507,22 @@ Example file structure:
         name: file.path || file.name,
         content: file.content
       }));
+      console.log(`✅ Extracted ${diffs.length} files from parsed JSON structure`);
     }
 
     // Return short summary for chat and files for deployment
     const summary = parsed?.summary || "I'll create your app with the specified features.";
 
-    console.log(`Extracted ${diffs.length} files for deployment`);
+    // Final validation and logging
+    if (diffs.length === 0) {
+      console.log('⚠️ No files extracted - this may indicate a parsing issue');
+      console.log('Response preview:', text.substring(0, 500) + '...');
+    } else {
+      console.log(`🎉 Successfully extracted ${diffs.length} files for deployment`);
+      diffs.forEach((file, i) => {
+        console.log(`  ${i + 1}. ${file.name} (${file.content.length} chars)`);
+      });
+    }
 
     return {
       plan: { message: summary, prompt },

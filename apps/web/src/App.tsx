@@ -119,7 +119,7 @@ export default function App() {
   const [fileTree, setFileTree] = useState<Array<{type: 'file' | 'dir'; path: string}>>([]);
   const [isListening, setIsListening] = useState(false);
   const [speechSupported, setSpeechSupported] = useState(false);
-  const [selectedModel, setSelectedModel] = useState('google/gemini-2.0-flash-exp:free');
+  const [selectedModel, setSelectedModel] = useState('claude-sonnet-4-20250514');
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [currentAppId, setCurrentAppId] = useState<string | null>(null);
 
