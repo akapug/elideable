@@ -123,6 +123,89 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  if (url.pathname === '/api/files/open' && req.method === 'POST') {
+    const data = await readJSON(req, res);
+    const { appId, filePath } = data;
+
+    if (!appId || !filePath) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Missing appId or filePath' }));
+      return;
+    }
+
+    const appDir = path.join(process.cwd(), 'generated-apps', appId);
+    const fullFilePath = path.join(appDir, filePath);
+
+    // Security check: ensure the file is within the app directory
+    if (!fullFilePath.startsWith(appDir)) {
+      res.writeHead(403, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Access denied' }));
+      return;
+    }
+
+    if (fs.existsSync(fullFilePath)) {
+      try {
+        // Try to open the file in the system's default editor
+        const { exec } = await import('child_process');
+        const command = process.platform === 'win32' ? `start "" "${fullFilePath}"` :
+                      process.platform === 'darwin' ? `open "${fullFilePath}"` :
+                      `xdg-open "${fullFilePath}"`;
+
+        exec(command, (error) => {
+          if (error) {
+            console.log(`Could not open file in system editor: ${error.message}`);
+          }
+        });
+
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: true }));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Failed to open file' }));
+      }
+    } else {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'File not found' }));
+    }
+    return;
+  }
+
+  if (url.pathname === '/api/files/content' && req.method === 'GET') {
+    const appId = url.searchParams.get('appId');
+    const filePath = url.searchParams.get('filePath');
+
+    if (!appId || !filePath) {
+      res.writeHead(400, { 'Content-Type': 'text/plain' });
+      res.end('Missing appId or filePath');
+      return;
+    }
+
+    const appDir = path.join(process.cwd(), 'generated-apps', appId);
+    const fullFilePath = path.join(appDir, filePath);
+
+    // Security check: ensure the file is within the app directory
+    if (!fullFilePath.startsWith(appDir)) {
+      res.writeHead(403, { 'Content-Type': 'text/plain' });
+      res.end('Access denied');
+      return;
+    }
+
+    if (fs.existsSync(fullFilePath)) {
+      try {
+        const content = fs.readFileSync(fullFilePath, 'utf8');
+        res.writeHead(200, { 'Content-Type': 'text/plain' });
+        res.end(content);
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'text/plain' });
+        res.end('Failed to read file');
+      }
+    } else {
+      res.writeHead(404, { 'Content-Type': 'text/plain' });
+      res.end('File not found');
+    }
+    return;
+  }
+
   if (url.pathname === '/api/polyglot/execute' && req.method === 'POST') {
     await executePolyglotCode(req, res);
     return;

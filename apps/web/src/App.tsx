@@ -43,7 +43,16 @@ function GeneratedPreview({ previewUrl }: { previewUrl?: string }) {
   }
 
   return (
-    <div className="h-full w-full">
+    <div className="h-full w-full relative">
+      {/* Open in New Tab Button */}
+      <button
+        onClick={() => window.open(previewUrl, '_blank')}
+        className="absolute top-2 right-2 z-10 bg-slate-800/90 hover:bg-slate-700 text-slate-200 px-3 py-1 rounded-md text-xs font-medium border border-slate-600/50 hover:border-slate-500 transition-colors"
+        title="Open in new tab"
+      >
+        🔗 Open in New Tab
+      </button>
+
       <iframe
         src={previewUrl}
         className="w-full h-full border-0 rounded-lg"
@@ -137,6 +146,43 @@ export default function App() {
       const json = await resp.json();
       setFileTree(json.tree || []);
     } catch {}
+  }
+
+  async function openFileInSystem(filePath: string) {
+    if (!currentAppId) return;
+
+    try {
+      // Request the backend to open the file in the system editor
+      await fetch(`http://localhost:8787/api/files/open`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ appId: currentAppId, filePath }),
+      });
+    } catch (error) {
+      console.error('Failed to open file:', error);
+      // Fallback: try to fetch and display the file content
+      try {
+        const resp = await fetch(`http://localhost:8787/api/files/content?appId=${currentAppId}&filePath=${encodeURIComponent(filePath)}`);
+        const content = await resp.text();
+
+        // Create a new window with the file content
+        const newWindow = window.open('', '_blank');
+        if (newWindow) {
+          newWindow.document.write(`
+            <html>
+              <head><title>${filePath}</title></head>
+              <body>
+                <h3>${filePath}</h3>
+                <pre style="background: #f5f5f5; padding: 20px; overflow: auto;">${content}</pre>
+              </body>
+            </html>
+          `);
+        }
+      } catch (fallbackError) {
+        console.error('Fallback failed:', fallbackError);
+        alert(`Could not open file: ${filePath}`);
+      }
+    }
   }
 
   useEffect(() => {
