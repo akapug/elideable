@@ -1,0 +1,12 @@
+amends "elide:project.pkl"
+
+name = "Create a simple hello world app"
+description = "Generated Elide polyglot application"
+version = "1.0.0"
+
+entrypoint = "app.js"
+
+dependencies {
+  
+  
+}

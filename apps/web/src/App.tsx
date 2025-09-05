@@ -77,25 +77,45 @@ interface Message {
 
 function Pane({ title, children }: { title: string; children?: React.ReactNode }) {
   return (
-    <div className="flex flex-col h-full border border-slate-700/50 rounded-lg overflow-hidden bg-slate-900/50 backdrop-blur-sm">
-      <div className="px-4 py-3 text-sm font-medium bg-slate-800/80 border-b border-slate-700/50 text-slate-200">
+    <div className="flex flex-col h-full border border-slate-700/50 rounded-lg overflow-hidden bg-slate-900/50 backdrop-blur-sm resize">
+      <div className="px-4 py-3 text-sm font-medium bg-slate-800/80 border-b border-slate-700/50 text-slate-200 cursor-move">
         {title}
       </div>
-      <div className="flex-1 overflow-auto">{children}</div>
+      <div className="flex-1 overflow-auto scrollbar-thin scrollbar-thumb-slate-600 scrollbar-track-slate-800">{children}</div>
     </div>
   );
 }
 
 function MessageBubble({ message }: { message: Message }) {
   const isUser = message.role === 'user';
+  const [expanded, setExpanded] = useState(false);
+
+  // Truncate long messages
+  const maxLength = 2000;
+  const content = message.content;
+  const shouldTruncate = content.length > maxLength;
+  const displayContent = shouldTruncate && !expanded
+    ? content.slice(0, maxLength) + '...'
+    : content;
+
   return (
     <div className={`flex ${isUser ? 'justify-end' : 'justify-start'} mb-4`}>
       <div className={`max-w-[80%] rounded-2xl px-4 py-3 ${
-        isUser 
-          ? 'bg-blue-600 text-white' 
+        isUser
+          ? 'bg-blue-600 text-white'
           : 'bg-slate-800 text-slate-100 border border-slate-700/50'
       }`}>
-        <div className="text-sm whitespace-pre-wrap">{message.content}</div>
+        <div className="text-sm whitespace-pre-wrap break-words overflow-hidden">
+          {displayContent}
+        </div>
+        {shouldTruncate && (
+          <button
+            onClick={() => setExpanded(!expanded)}
+            className={`text-xs mt-2 underline ${isUser ? 'text-blue-100' : 'text-slate-400'} hover:opacity-80`}
+          >
+            {expanded ? 'Show less' : 'Show more'}
+          </button>
+        )}
         <div className={`text-xs mt-1 ${isUser ? 'text-blue-100' : 'text-slate-400'}`}>
           {message.timestamp.toLocaleTimeString()}
         </div>
@@ -140,8 +160,8 @@ export default function App() {
   async function refreshTree() {
     try {
       const url = currentAppId
-        ? `http://localhost:8787/api/files/tree?appId=${currentAppId}`
-        : 'http://localhost:8787/api/files/tree';
+        ? `http://localhost:8788/api/files/tree?appId=${currentAppId}`
+        : 'http://localhost:8788/api/files/tree';
       const resp = await fetch(url);
       const json = await resp.json();
       setFileTree(json.tree || []);
@@ -153,7 +173,7 @@ export default function App() {
 
     try {
       // Request the backend to open the file in the system editor
-      await fetch(`http://localhost:8787/api/files/open`, {
+      await fetch(`http://localhost:8788/api/files/open`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ appId: currentAppId, filePath }),
@@ -162,7 +182,7 @@ export default function App() {
       console.error('Failed to open file:', error);
       // Fallback: try to fetch and display the file content
       try {
-        const resp = await fetch(`http://localhost:8787/api/files/content?appId=${currentAppId}&filePath=${encodeURIComponent(filePath)}`);
+        const resp = await fetch(`http://localhost:8788/api/files/content?appId=${currentAppId}&filePath=${encodeURIComponent(filePath)}`);
         const content = await resp.text();
 
         // Create a new window with the file content
@@ -222,7 +242,7 @@ export default function App() {
     }
   }
 
-  async function sendMessage() {
+  async function sendMessage(mode: 'chat' | 'edit' = 'edit') {
     if (!input.trim() || busy) return;
 
     const userMessage: Message = {
@@ -238,10 +258,10 @@ export default function App() {
 
     try {
       // Step 1: Generate the plan
-      const resp = await fetch('http://localhost:8787/api/ai/plan', {
+      const resp = await fetch('http://localhost:8788/api/ai/plan', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prompt: userMessage.content, model: selectedModel }),
+        body: JSON.stringify({ prompt: userMessage.content, model: selectedModel, mode, appId: currentAppId || undefined }),
       });
       const json = await resp.json();
 
@@ -290,7 +310,7 @@ export default function App() {
         setMessages(prev => [...prev, creatingMessage]);
 
         try {
-          const applyResp = await fetch('http://localhost:8787/api/ai/apply', {
+          const applyResp = await fetch('http://localhost:8788/api/ai/apply', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -364,7 +384,7 @@ export default function App() {
         <div className="col-span-3">
           <Pane title="Chat">
             <div className="flex flex-col h-full">
-              <div className="flex-1 overflow-auto p-4 space-y-1">
+              <div className="flex-1 overflow-y-auto p-4 space-y-1 max-h-[calc(100vh-300px)]">
                 {messages.map(message => (
                   <MessageBubble key={message.id} message={message} />
                 ))}
@@ -423,11 +443,19 @@ export default function App() {
                     </button>
                   )}
                   <button
-                    onClick={sendMessage}
+                    onClick={() => sendMessage('edit')}
                     disabled={busy || !input.trim()}
                     className="px-6 py-3 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 disabled:cursor-not-allowed rounded-xl text-sm font-medium transition-colors"
                   >
                     Send
+                  </button>
+                  <button
+                    onClick={() => sendMessage('chat')}
+                    disabled={busy || !input.trim()}
+                    className="px-6 py-3 bg-slate-700 hover:bg-slate-600 disabled:opacity-50 disabled:cursor-not-allowed rounded-xl text-sm font-medium transition-colors"
+                    title="Chat-only (no file writes); plan or discuss before building"
+                  >
+                    Chat
                   </button>
 
                 </div>

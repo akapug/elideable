@@ -9,7 +9,7 @@ import crypto from 'node:crypto';
 const ROOT = process.cwd();
 const GENERATED_APPS_DIR = path.join(ROOT, 'generated-apps');
 
-const PORT = Number(process.env.PORT_ELIDE || 8787);
+const PORT = Number(process.env.PORT_ELIDE || 8788);
 const PROVIDER = process.env.ELV_PROVIDER || 'openrouter';
 
 // Track running Elide processes
@@ -23,6 +23,8 @@ const anthropicKey = process.env.ANTHROPIC_API_KEY;
 openrouterKey = process.env.OPENROUTER_API_KEY;
 
 console.log(`[elide] Provider: ${PROVIDER}`);
+console.log(`[elide] Anthropic key: ${anthropicKey ? 'present' : 'missing'}`);
+console.log(`[elide] OpenRouter key: ${openrouterKey ? 'present' : 'missing'}`);
 
 if (PROVIDER === 'gemini' && geminiKey) {
   genAI = new GoogleGenerativeAI(geminiKey);
@@ -51,9 +53,9 @@ const server = http.createServer(async (req, res) => {
   }
   if (url.pathname === '/api/ai/plan' && req.method === 'POST') {
     const body = await readJSON(req, res);
-    console.log('[ai] Planning request:', body?.prompt, 'with model:', body?.model);
+    console.log('[ai] Planning request:', body?.prompt, 'with model:', body?.model, 'mode:', body?.mode || 'edit');
     try {
-      const result = await generatePlan(body?.prompt || 'Create a simple app', body?.model);
+      const result = await generatePlan(body?.prompt || 'Create a simple app', body?.model, { mode: body?.mode || 'edit', appId: body?.appId || null });
       console.log('[ai] Generated plan:', JSON.stringify(result, null, 2));
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(result));
@@ -66,25 +68,33 @@ const server = http.createServer(async (req, res) => {
   }
   if (url.pathname === '/api/ai/apply' && req.method === 'POST') {
     const body = await readJSON(req, res);
-    const { files, appName } = body;
+    const { files = [], edits = [], appName, appId: incomingAppId } = body || {};
 
-    // Generate unique app ID
-    const appId = crypto.randomUUID();
+    // Reuse existing app if provided, else create new
+    const appId = incomingAppId || crypto.randomUUID();
 
     try {
-      // Create isolated Elide app
-      const { appDir, changed } = await createIsolatedApp(appId, files || [], appName || 'Generated App');
+      let appDir = path.join(GENERATED_APPS_DIR, appId);
+      const exists = await fs.stat(appDir).then(() => true).catch(() => false);
+      let changed = [];
 
-      // Start the Elide app
+      if (!exists) {
+        // First-time creation path keeps existing behavior
+        const created = await createIsolatedApp(appId, files, appName || 'Generated App');
+        appDir = created.appDir;
+        changed = created.changed;
+      } else {
+        // Iterative update: write new/updated files then apply edits
+        const fileChanges = await writeFilesToApp(appId, files);
+        const editChanges = await applyEditsToApp(appId, edits);
+        changed = [...fileChanges, ...editChanges];
+      }
+
+      // Restart the app on same appId
       const { port, url } = await startElideApp(appId, appDir);
 
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({
-        appId,
-        changed,
-        previewUrl: url,
-        port
-      }));
+      res.end(JSON.stringify({ appId, changed, previewUrl: url, port }));
     } catch (error) {
       console.error('[elide] Failed to create/start app:', error);
       res.writeHead(500, { 'Content-Type': 'application/json' });
@@ -123,89 +133,6 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  if (url.pathname === '/api/files/open' && req.method === 'POST') {
-    const data = await readJSON(req, res);
-    const { appId, filePath } = data;
-
-    if (!appId || !filePath) {
-      res.writeHead(400, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Missing appId or filePath' }));
-      return;
-    }
-
-    const appDir = path.join(process.cwd(), 'generated-apps', appId);
-    const fullFilePath = path.join(appDir, filePath);
-
-    // Security check: ensure the file is within the app directory
-    if (!fullFilePath.startsWith(appDir)) {
-      res.writeHead(403, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Access denied' }));
-      return;
-    }
-
-    if (fs.existsSync(fullFilePath)) {
-      try {
-        // Try to open the file in the system's default editor
-        const { exec } = await import('child_process');
-        const command = process.platform === 'win32' ? `start "" "${fullFilePath}"` :
-                      process.platform === 'darwin' ? `open "${fullFilePath}"` :
-                      `xdg-open "${fullFilePath}"`;
-
-        exec(command, (error) => {
-          if (error) {
-            console.log(`Could not open file in system editor: ${error.message}`);
-          }
-        });
-
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ success: true }));
-      } catch (error) {
-        res.writeHead(500, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'Failed to open file' }));
-      }
-    } else {
-      res.writeHead(404, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'File not found' }));
-    }
-    return;
-  }
-
-  if (url.pathname === '/api/files/content' && req.method === 'GET') {
-    const appId = url.searchParams.get('appId');
-    const filePath = url.searchParams.get('filePath');
-
-    if (!appId || !filePath) {
-      res.writeHead(400, { 'Content-Type': 'text/plain' });
-      res.end('Missing appId or filePath');
-      return;
-    }
-
-    const appDir = path.join(process.cwd(), 'generated-apps', appId);
-    const fullFilePath = path.join(appDir, filePath);
-
-    // Security check: ensure the file is within the app directory
-    if (!fullFilePath.startsWith(appDir)) {
-      res.writeHead(403, { 'Content-Type': 'text/plain' });
-      res.end('Access denied');
-      return;
-    }
-
-    if (fs.existsSync(fullFilePath)) {
-      try {
-        const content = fs.readFileSync(fullFilePath, 'utf8');
-        res.writeHead(200, { 'Content-Type': 'text/plain' });
-        res.end(content);
-      } catch (error) {
-        res.writeHead(500, { 'Content-Type': 'text/plain' });
-        res.end('Failed to read file');
-      }
-    } else {
-      res.writeHead(404, { 'Content-Type': 'text/plain' });
-      res.end('File not found');
-    }
-    return;
-  }
-
   if (url.pathname === '/api/polyglot/execute' && req.method === 'POST') {
     await executePolyglotCode(req, res);
     return;
@@ -234,9 +161,11 @@ const server = http.createServer(async (req, res) => {
   res.end(JSON.stringify({ error: 'not_found' }));
 });
 
-async function generatePlan(prompt, model = null) {
+async function generatePlan(prompt, model = null, options = {}) {
+  const mode = options?.mode || 'edit'; // 'chat' disables tool-calling and file extraction
   if (!genAI && !anthropic && !openrouterKey) {
-    return { plan: { message: 'No AI provider configured', prompt }, diffs: [] };
+    // Providerless fallback: synthesize minimal files based on prompt
+    return fallbackGeneratePlan(prompt);
   }
 
   // Determine provider based on model
@@ -251,22 +180,28 @@ async function generatePlan(prompt, model = null) {
     }
   }
 
-  const systemPrompt = `You are an expert polyglot developer using Elide runtime. Create working applications that leverage multiple programming languages in a single codebase.
+  const systemPrompt = `You are an expert Elide polyglot app builder. Elide is a high-performance polyglot runtime that supports JavaScript, TypeScript, Python, Kotlin, and Java in the same project.
+
+Given a user's description, create a detailed plan for building their app using Elide's polyglot capabilities.
 
 ELIDE CAPABILITIES:
-- JavaScript/TypeScript: Frontend components, API interfaces, utilities
-- Python: Data processing, ML/AI, text analysis, scientific computing
+- JavaScript/TypeScript: Frontend components, Node.js-compatible APIs
+- Python: Data processing, ML/AI, scientific computing, text analysis
 - Kotlin: High-performance business logic, type-safe operations
 - Java: Enterprise integrations, complex algorithms
-- All languages can interoperate seamlessly in the same application
+- Mix languages in the same project for optimal performance
 
-LANGUAGE SELECTION STRATEGY:
-- TypeScript: React components, type definitions, frontend logic
-- Python: Data manipulation, AI/ML, text processing, algorithms
-- Kotlin: Business rules, validation, performance-critical operations
-- JavaScript: Utilities, Node.js compatibility, simple functions
+RESPONSE FORMAT - JSON object containing:
+- summary: Brief description highlighting which languages you'll use and why
+- files: Array of files with polyglot code (mix JS/TS/Python/Kotlin as appropriate)
+- technologies: List of Elide-supported technologies
 
-Create a complete working application with multiple files using different languages as appropriate.
+BEST PRACTICES:
+- Use Python for data processing, text analysis, ML tasks
+- Use TypeScript for React components and frontend logic
+- Use Kotlin for performance-critical backend operations
+- Create realistic, working polyglot applications
+- Include proper imports and Elide-compatible code
 
 Example file structure:
 - App.tsx (React frontend)
@@ -274,31 +209,32 @@ Example file structure:
 - core/BusinessLogic.kt (Kotlin business rules)
 - utils/helpers.js (JavaScript utilities)`;
 
+  // Anthropic tool schema for file creation (now declared inside planWithAnthropicTools)
+
   let text;
 
   if (useProvider === 'anthropic' && anthropic) {
-    const response = await anthropic.messages.create({
-      model: 'claude-sonnet-4-20250514',
-      max_tokens: 8000,  // Increased for large responses
-      system: systemPrompt,
-      messages: [
-        { role: 'user', content: prompt }
-      ]
-    });
-    text = response.content[0].text;
+    if (mode !== 'chat') {
+      const toolPlan = await planWithAnthropicTools({ prompt, systemPrompt, anthropic, appId: options?.appId || null });
+      return toolPlan;
+    } else {
+      const response = await anthropic.messages.create({
+        model: 'claude-sonnet-4-20250514',
+        max_tokens: 2000,
+        system: systemPrompt,
+        messages: [
+          { role: 'user', content: prompt }
+        ]
+      });
+      text = (response.content?.find?.(c => c.type === 'text')?.text) || response.content?.[0]?.text || '';
+    }
   } else if (useProvider === 'gemini' && genAI) {
     const geminiModel = genAI.getGenerativeModel({ model: model || 'gemini-1.5-flash' });
     const fullPrompt = `${systemPrompt}\n\nUser request: ${prompt}`;
     const result = await geminiModel.generateContent(fullPrompt);
     const response = await result.response;
     text = response.text();
-  } else if (useProvider === 'openrouter') {
-    if (!openrouterKey) {
-      throw new Error('OpenRouter API key not configured. Please set OPENROUTER_API_KEY in your .env file.');
-    }
-
-    console.log(`[ai] Making OpenRouter request with model: ${model || 'google/gemini-2.0-flash-exp:free'}`);
-
+  } else if (useProvider === 'openrouter' && openrouterKey) {
     const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
       method: 'POST',
       headers: {
@@ -314,23 +250,21 @@ Example file structure:
           { role: 'user', content: prompt }
         ],
         max_tokens: 4000,
-        temperature: 0.7,
-        response_format: { type: 'json_object' }
+        temperature: 0.7
       })
     });
 
     if (!response.ok) {
-      const errorText = await response.text();
-      console.error(`[ai] OpenRouter API error: ${response.status} - ${errorText}`);
-      throw new Error(`OpenRouter API error: ${response.status} - ${errorText}`);
+      throw new Error(`OpenRouter API error: ${response.status}`);
     }
 
     const data = await response.json();
-    console.log(`[ai] OpenRouter response received, choices: ${data.choices?.length}`);
     text = data.choices[0].message.content;
   }
 
-  // Parse JSON response - robust handling for Claude 4.0 Sonnet and all models
+  // Parse JSON response - handle Claude 4.0 Sonnet's complex format
+  // If Anthropic handled tool-calling and returned early, we won't reach this block.
+
   try {
     let parsed = null;
     let diffs = [];
@@ -340,8 +274,6 @@ Example file structure:
       console.log('Invalid or empty response text');
       return { plan: { message: 'No response received', prompt }, diffs: [] };
     }
-
-    console.log(`Response length: ${text.length} characters`);
 
     // Check if response is ONLY markdown code blocks (not JSON structure)
     if (text.includes('```') && !text.includes('```json') && !text.includes('"files"') && !text.includes('"name"')) {
@@ -418,75 +350,6 @@ Example file structure:
       }
     }
 
-    // CRITICAL: Handle raw JSON responses (Claude 4.0 Sonnet's main format)
-    if (!parsed && !text.includes('```json')) {
-      console.log('No code blocks found, attempting to parse raw JSON...');
-      try {
-        parsed = JSON.parse(text);
-        console.log('✅ Successfully parsed raw JSON');
-      } catch (rawError) {
-        console.log(`❌ Raw JSON parse failed: ${rawError.message}`);
-
-        // Handle truncated JSON (very common with Claude 4.0 Sonnet)
-        if (rawError.message.includes('Unexpected end') || rawError.message.includes('Expected')) {
-          console.log('🔧 Attempting to fix truncated JSON...');
-
-          // Find the last complete file entry
-          const lastFileEnd = text.lastIndexOf('    }');
-          if (lastFileEnd > 0) {
-            let fixedText = text.substring(0, lastFileEnd + 5);
-
-            // Close the JSON structure properly
-            if (!fixedText.includes('],')) {
-              fixedText += '\n  ],\n  "technologies": ["react", "typescript", "python", "kotlin"]\n}';
-            }
-
-            try {
-              parsed = JSON.parse(fixedText);
-              console.log('✅ Successfully parsed fixed truncated JSON');
-            } catch (fixError) {
-              console.log(`❌ Failed to fix truncated JSON: ${fixError.message}`);
-            }
-          }
-        }
-
-        // If still no parsed data, use regex extraction on raw text
-        if (!parsed) {
-          console.log('🔍 Using regex extraction on raw JSON...');
-
-          const rawFilePattern = /"path":\s*"([^"]+)"[\s\S]*?"content":\s*"((?:[^"\\]|\\.)*)"/g;
-          let match;
-          while ((match = rawFilePattern.exec(text)) !== null) {
-            const fileName = match[1];
-            let content = match[2];
-
-            // Comprehensive unescaping
-            content = content
-              .replace(/\\n/g, '\n')
-              .replace(/\\t/g, '\t')
-              .replace(/\\r/g, '\r')
-              .replace(/\\"/g, '"')
-              .replace(/\\\\/g, '\\');
-
-            diffs.push({
-              name: fileName,
-              content: content
-            });
-          }
-
-          if (diffs.length > 0) {
-            console.log(`✅ Extracted ${diffs.length} files from raw JSON using regex`);
-
-            // Create parsed object for summary
-            const summaryMatch = text.match(/"summary":\s*"([^"]*)"/);
-            parsed = {
-              summary: summaryMatch ? summaryMatch[1] : "Polyglot app created successfully"
-            };
-          }
-        }
-      }
-    }
-
     // If we still don't have parsed data, try the old method
     if (!parsed) {
       const cleanedText = text.replace(/`([^`]*)`/gs, (match, content) => {
@@ -507,22 +370,12 @@ Example file structure:
         name: file.path || file.name,
         content: file.content
       }));
-      console.log(`✅ Extracted ${diffs.length} files from parsed JSON structure`);
     }
 
     // Return short summary for chat and files for deployment
     const summary = parsed?.summary || "I'll create your app with the specified features.";
 
-    // Final validation and logging
-    if (diffs.length === 0) {
-      console.log('⚠️ No files extracted - this may indicate a parsing issue');
-      console.log('Response preview:', text.substring(0, 500) + '...');
-    } else {
-      console.log(`🎉 Successfully extracted ${diffs.length} files for deployment`);
-      diffs.forEach((file, i) => {
-        console.log(`  ${i + 1}. ${file.name} (${file.content.length} chars)`);
-      });
-    }
+    console.log(`Extracted ${diffs.length} files for deployment`);
 
     return {
       plan: { message: summary, prompt },
@@ -532,6 +385,205 @@ Example file structure:
     console.warn('JSON parse error:', e.message);
     return { plan: { message: text, prompt }, diffs: [] };
   }
+}
+// Providerless minimal plan generator
+function fallbackGeneratePlan(prompt) {
+  const p = String(prompt || '').toLowerCase();
+  if (p.includes('blog')) {
+    const files = [
+      { name: 'index.html', content: `<!doctype html><html><head><meta charset="utf-8"/><title>Pug Blog</title><style>body{font-family:system-ui;margin:2rem;max-width:700px} header{display:flex;align-items:center;gap:1rem} img{width:64px;height:64px;border-radius:50%} h1{margin:0}</style></head><body><header><img src="https://avatars.githubusercontent.com/u/215816?v=4" alt="Pug"/><div><h1>David "Pug" Anderson</h1><div>Personal blog</div></div></header><main><article><h2>Hello, world</h2><p>Welcome to my blog powered by Elideable.</p></article></main></body></html>` }
+    ];
+    return { plan: { message: 'Creating a simple personal blog for Pug with index.html.', prompt }, diffs: files };
+  }
+  const files = [
+    { name: 'index.html', content: '<!doctype html><html><head><meta charset="utf-8"/><title>Hello Elide</title><style>body{font-family:system-ui;display:grid;place-items:center;height:100vh} h1{font-size:3rem}</style></head><body><h1>Hello, Elide! 🚀</h1></body></html>' }
+  ];
+  return { plan: { message: 'Creating a minimal Hello World app (index.html).', prompt }, diffs: files };
+}
+
+
+// --- Tool Planning Helpers (Anthropic) ---
+async function planWithAnthropicTools({ prompt, systemPrompt, anthropic, appId }) {
+  const tools = [
+    {
+      name: 'write_files',
+      description: 'Create or overwrite application files with complete content. This tool should be used whenever you need to generate actual file contents for the user\'s app. You must provide the complete file content, not just snippets. Use this for creating HTML, CSS, JavaScript, Python, or any other files. The files will be written to the app directory and served to the user.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          files: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                path: { type: 'string', description: 'File path relative to app root, e.g. "index.html" or "styles/main.css"' },
+                content: { type: 'string', description: 'Complete file content as a string' }
+              },
+              required: ['path','content']
+            }
+          }
+        },
+        required: ['files']
+      }
+    }
+  ];
+
+  console.log('[ai] Sending request to Anthropic with tools:', tools.map(t => t.name));
+  const stream = await anthropic.messages.create({
+    model: 'claude-sonnet-4-20250514', max_tokens: 64000,
+    system: systemPrompt + '\n\nCRITICAL: You MUST use the write_files tool to create actual files. Never just describe or explain what files you would create. Always immediately call write_files with complete, working file contents. The user expects actual files to be generated.',
+    tools, tool_choice: { type: 'any' },
+    stream: true,
+    messages: [{ role: 'user', content: appId ? [{ type: 'text', text: prompt }, { type: 'text', text: `Active app id: ${appId}` }] : [{ type: 'text', text: prompt + '\n\nPlease use the write_files tool to create the actual files.' }] }]
+  });
+
+  // Collect the streaming response
+  let response = { content: [], stop_reason: null, usage: null };
+  for await (const chunk of stream) {
+    if (chunk.type === 'content_block_delta') {
+      if (!response.content[chunk.index]) {
+        response.content[chunk.index] = { type: chunk.delta.type };
+      }
+      if (chunk.delta.type === 'text_delta') {
+        response.content[chunk.index].text = (response.content[chunk.index].text || '') + chunk.delta.text;
+      } else if (chunk.delta.type === 'input_json_delta') {
+        response.content[chunk.index].input = (response.content[chunk.index].input || '') + chunk.delta.partial_json;
+      }
+    } else if (chunk.type === 'content_block_start') {
+      response.content[chunk.index] = chunk.content_block;
+    } else if (chunk.type === 'message_delta') {
+      response.stop_reason = chunk.delta.stop_reason;
+      response.usage = chunk.usage;
+    }
+  }
+
+  console.log('[ai] Anthropic response:', JSON.stringify(response, null, 2));
+
+  const diffs = [];
+  const summaryParts = [];
+
+  async function readFileForApp(p) {
+    if (!appId) return '';
+    try { const appDir = path.join(GENERATED_APPS_DIR, appId); const full = path.join(appDir, p); return await fs.readFile(full, 'utf8'); } catch { return ''; }
+  }
+
+  for (const block of response.content || []) {
+    if (block.type === 'text' && block.text) summaryParts.push(block.text);
+    if (block.type === 'tool_use') {
+      const input = block.input || {};
+      if (block.name === 'write_files') {
+        const files = input.files || [];
+        for (const f of files) diffs.push({ name: f.path || f.name, content: f.content ?? '' });
+      }
+      if (block.name === 'read_file') {
+        const content = await readFileForApp(input.path);
+        summaryParts.push(`Read ${input.path} (${content.length} bytes)`);
+      }
+      if (block.name === 'replace_in_file') {
+        const content = await readFileForApp(input.path);
+        if (content) {
+          let replaced = content;
+          if (input.regex) {
+            const re = new RegExp(input.find, input.flags || 'g');
+            replaced = replaced.replace(re, input.replace);
+          } else {
+            if (typeof input.count === 'number' && input.count >= 0) {
+              let remaining = input.count; let idx = 0; let out = '';
+              while (remaining !== 0) {
+                const next = replaced.indexOf(input.find, idx);
+                if (next === -1) { out += replaced.slice(idx); break; }
+                out += replaced.slice(idx, next) + input.replace;
+                idx = next + input.find.length;
+                if (remaining > 0) remaining--;
+              }
+              if (remaining === 0) out += replaced.slice(idx);
+              replaced = out || replaced;
+            } else {
+              replaced = replaced.split(input.find).join(input.replace);
+            }
+          }
+          diffs.push({ name: input.path, content: replaced });
+        }
+      }
+      if (block.name === 'update_block') {
+        const content = await readFileForApp(input.path);
+        if (content) {
+          const startIdx = content.indexOf(input.start);
+          const endIdx = content.indexOf(input.end, startIdx + input.start.length);
+          if (startIdx !== -1 && endIdx !== -1) {
+            const before = content.slice(0, input.include_markers ? startIdx + input.start.length : startIdx);
+            const after = content.slice(input.include_markers ? endIdx : endIdx + input.end.length);
+            const next = before + input.new_content + after;
+            diffs.push({ name: input.path, content: next });
+          }
+        }
+      }
+    }
+  }
+
+  const summary = summaryParts.join('\n\n');
+  return { plan: { message: summary || 'Generated plan with proposed files/edits.', prompt }, diffs };
+}
+
+// --- Apply helpers ---
+async function writeFilesToApp(appId, files) {
+  const changed = [];
+  const appDir = path.join(GENERATED_APPS_DIR, appId);
+  await fs.mkdir(appDir, { recursive: true });
+  for (const f of files || []) {
+    const name = f.name || f.path;
+    if (!name) continue;
+    const dest = path.join(appDir, name);
+    await fs.mkdir(path.dirname(dest), { recursive: true });
+    await fs.writeFile(dest, f.content ?? f.contents ?? '', 'utf8');
+    changed.push(name);
+  }
+  return changed;
+}
+
+async function applyEditsToApp(appId, edits) {
+  const changed = [];
+  const appDir = path.join(GENERATED_APPS_DIR, appId);
+  for (const e of edits || []) {
+    const dest = path.join(appDir, e.path);
+    let content = await fs.readFile(dest, 'utf8').catch(() => '');
+    if (!content) continue;
+    if (e.type === 'replace_in_file') {
+      if (e.regex) {
+        const re = new RegExp(e.find, e.flags || 'g');
+        content = content.replace(re, e.replace);
+      } else {
+        if (typeof e.count === 'number' && e.count >= 0) {
+          let remaining = e.count; let idx = 0; let out = '';
+          while (remaining !== 0) {
+            const next = content.indexOf(e.find, idx);
+            if (next === -1) { out += content.slice(idx); break; }
+            out += content.slice(idx, next) + e.replace;
+            idx = next + e.find.length;
+            if (remaining > 0) remaining--;
+          }
+          if (remaining === 0) out += content.slice(idx);
+          content = out || content;
+        } else {
+          content = content.split(e.find).join(e.replace);
+        }
+      }
+      await fs.writeFile(dest, content, 'utf8');
+      changed.push(e.path);
+    }
+    if (e.type === 'update_block') {
+      const startIdx = content.indexOf(e.start);
+      const endIdx = content.indexOf(e.end, startIdx + e.start.length);
+      if (startIdx !== -1 && endIdx !== -1) {
+        const before = content.slice(0, e.include_markers ? startIdx + e.start.length : startIdx);
+        const after = content.slice(e.include_markers ? endIdx : endIdx + e.end.length);
+        const next = before + (e.new_content ?? '') + after;
+        await fs.writeFile(dest, next, 'utf8');
+        changed.push(e.path);
+      }
+    }
+  }
+  return changed;
 }
 
 // --- Polyglot execution endpoints ---
@@ -784,7 +836,18 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (req.url === '/') {
-    // Serve the actual React app
+    // If index.html exists in the app dir, serve it
+    try {
+      const indexPath = path.join(APP_DIR, 'index.html');
+      if (fs.existsSync(indexPath)) {
+        const html = fs.readFileSync(indexPath, 'utf8');
+        res.writeHead(200, { 'Content-Type': 'text/html' });
+        res.end(html);
+        return;
+      }
+    } catch {}
+
+    // Serve the default demo React app
     const html = '<!DOCTYPE html>' +
       '<html><head><title>Elide App</title>' +
       '<script src="https://unpkg.com/react@18/umd/react.development.js"></script>' +
@@ -1002,7 +1065,7 @@ async function readTree() {
     }
   }
   try {
-    await walk(GENERATED_DIR);
+    await walk(GENERATED_APPS_DIR);
   } catch {
     // empty initially
   }
@@ -1011,7 +1074,7 @@ async function readTree() {
 
 async function readFileSafe(rel) {
   if (!rel) return '';
-  const full = path.join(GENERATED_DIR, rel);
+  const full = path.join(GENERATED_APPS_DIR, rel);
   const content = await fs.readFile(full, 'utf8').catch(() => '');
   return content;
 }
