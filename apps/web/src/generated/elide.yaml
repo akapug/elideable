@@ -1,0 +1,8 @@
+application:
+  name: NotesApp
+
+server:
+  port: 8080
+
+packages:
+  - core
