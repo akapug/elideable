@@ -1,22 +1,62 @@
 import React, { useState, useEffect } from 'react';
 import './index.css';
 
-function GeneratedPreview({ version = 0 }: { version?: number }) {
-  const [Comp, setComp] = useState<React.ComponentType | null>(null);
+function GeneratedPreview({ previewUrl }: { previewUrl?: string }) {
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
   useEffect(() => {
-    /* @vite-ignore */
-    import(`./generated/App?v=${version}`)
-      .then((m) => setComp(() => m.default))
-      .catch(() => setComp(null));
-  }, [version]);
-  if (!Comp) {
+    if (previewUrl) {
+      setLoading(true);
+      setError(null);
+
+      // Give the Elide app a moment to start up
+      const timer = setTimeout(() => {
+        setLoading(false);
+      }, 2000);
+
+      return () => clearTimeout(timer);
+    }
+  }, [previewUrl]);
+
+  if (!previewUrl) {
     return (
       <div className="h-full flex items-center justify-center text-slate-400">
         No generated app yet. Click Apply after planning.
       </div>
     );
   }
-  return <Comp />;
+
+  if (loading) {
+    return (
+      <div className="h-full flex items-center justify-center text-slate-400">
+        <div className="text-center">
+          <div className="flex space-x-1 justify-center mb-2">
+            <div className="w-2 h-2 bg-slate-400 rounded-full animate-bounce"></div>
+            <div className="w-2 h-2 bg-slate-400 rounded-full animate-bounce" style={{animationDelay: '0.1s'}}></div>
+            <div className="w-2 h-2 bg-slate-400 rounded-full animate-bounce" style={{animationDelay: '0.2s'}}></div>
+          </div>
+          <div>Starting Elide app...</div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="h-full w-full">
+      <iframe
+        src={previewUrl}
+        className="w-full h-full border-0 rounded-lg"
+        title="Generated Elide App Preview"
+        onError={() => setError('Failed to load preview')}
+      />
+      {error && (
+        <div className="absolute inset-0 flex items-center justify-center bg-slate-900/80 text-red-400">
+          {error}
+        </div>
+      )}
+    </div>
+  );
 }
 
 interface Message {
@@ -71,6 +111,8 @@ export default function App() {
   const [isListening, setIsListening] = useState(false);
   const [speechSupported, setSpeechSupported] = useState(false);
   const [selectedModel, setSelectedModel] = useState('google/gemini-2.0-flash-exp:free');
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [currentAppId, setCurrentAppId] = useState<string | null>(null);
 
   const models = [
     // OpenRouter Free Models
@@ -88,7 +130,10 @@ export default function App() {
 
   async function refreshTree() {
     try {
-      const resp = await fetch('http://localhost:8787/api/files/tree');
+      const url = currentAppId
+        ? `http://localhost:8787/api/files/tree?appId=${currentAppId}`
+        : 'http://localhost:8787/api/files/tree';
+      const resp = await fetch(url);
       const json = await resp.json();
       setFileTree(json.tree || []);
     } catch {}
@@ -153,16 +198,25 @@ export default function App() {
       });
       const json = await resp.json();
 
-      // Parse JSON from markdown code blocks if needed
+      // Parse JSON from markdown code blocks or raw JSON if needed
       let parsedResult = json;
       if (json.plan?.message && typeof json.plan.message === 'string') {
+        // Try markdown code block first
         const jsonMatch = json.plan.message.match(/```json\s*([\s\S]*?)\s*```/);
         if (jsonMatch) {
           try {
             const parsed = JSON.parse(jsonMatch[1]);
             parsedResult = { plan: parsed, diffs: [] };
           } catch (e) {
-            console.warn('Failed to parse JSON from response:', e);
+            console.warn('Failed to parse JSON from markdown:', e);
+          }
+        } else {
+          // Try parsing as raw JSON
+          try {
+            const parsed = JSON.parse(json.plan.message);
+            parsedResult = { plan: parsed, diffs: [] };
+          } catch (e) {
+            console.warn('Failed to parse raw JSON from response:', e);
           }
         }
       }
@@ -269,17 +323,55 @@ export default function App() {
                   {result?.plan?.files?.length ? (
                     <button
                       onClick={async () => {
-                        const resp = await fetch('http://localhost:8787/api/ai/apply', {
-                          method: 'POST',
-                          headers: { 'Content-Type': 'application/json' },
-                          body: JSON.stringify({ files: result.plan.files.map((f: {name?: string; path?: string; content?: string; contents?: string }) => ({ name: f.name || f.path, content: f.content || f.contents })) })
-                        });
-                        const json = await resp.json();
-                        console.log('Applied', json);
-                        await refreshTree();
+                        setBusy(true);
+                        try {
+                          const resp = await fetch('http://localhost:8787/api/ai/apply', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                              files: result.plan.files.map((f: {name?: string; path?: string; content?: string; contents?: string }) => ({
+                                name: f.name || f.path,
+                                content: f.content || f.contents
+                              })),
+                              appName: result.plan.summary || 'Generated App'
+                            })
+                          });
+                          const json = await resp.json();
+                          console.log('Applied', json);
+
+                          if (json.previewUrl) {
+                            setPreviewUrl(json.previewUrl);
+                            setCurrentAppId(json.appId);
+
+                            // Add success message
+                            const successMessage: Message = {
+                              id: Date.now().toString(),
+                              role: 'assistant',
+                              content: `✅ App deployed successfully! Preview available at ${json.previewUrl}`,
+                              timestamp: new Date()
+                            };
+                            setMessages(prev => [...prev, successMessage]);
+                          }
+
+                          await refreshTree();
+                        } catch (error) {
+                          console.error('Apply failed:', error);
+                          const errorMessage: Message = {
+                            id: Date.now().toString(),
+                            role: 'assistant',
+                            content: `❌ Failed to deploy app: ${error instanceof Error ? error.message : 'Unknown error'}`,
+                            timestamp: new Date()
+                          };
+                          setMessages(prev => [...prev, errorMessage]);
+                        } finally {
+                          setBusy(false);
+                        }
                       }}
-                      className="px-4 py-3 bg-emerald-600 hover:bg-emerald-500 rounded-xl text-sm font-medium transition-colors"
-                    >Apply</button>
+                      disabled={busy}
+                      className="px-4 py-3 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 disabled:cursor-not-allowed rounded-xl text-sm font-medium transition-colors"
+                    >
+                      {busy ? 'Deploying...' : 'Apply'}
+                    </button>
                   ) : null}
                 </div>
               </div>
@@ -290,7 +382,7 @@ export default function App() {
           <Pane title="Live Preview">
             <div className="p-4 h-full">
               <div className="w-full h-full bg-slate-800/50 rounded-xl border border-slate-700/50 text-slate-200">
-                <GeneratedPreview version={fileTree.length} />
+                <GeneratedPreview previewUrl={previewUrl || undefined} />
               </div>
             </div>
           </Pane>

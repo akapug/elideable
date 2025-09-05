@@ -1,0 +1,17 @@
+amends "elide:project.pkl"
+
+name = "I'll create a simple Hello World application that demonstrates Elide's polyglot capabilities. We'll use TypeScript for the frontend, Python for a simple text processor, and Kotlin for the greeting service."
+description = "Generated Elide polyglot application"
+version = "1.0.0"
+
+entrypoint = "src/App.tsx"
+
+dependencies {
+  npm {
+    packages {
+      "react@18"
+      "react-dom@18"
+    }
+  }
+  
+}

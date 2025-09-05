@@ -1,0 +1,17 @@
+amends "elide:project.pkl"
+
+name = "I'll create a minimal hello world app using TypeScript for the React frontend UI, Python for a simple greeting generator, and Kotlin for string manipulation logic. This demonstrates basic polyglot capabilities while keeping it simple."
+description = "Generated Elide polyglot application"
+version = "1.0.0"
+
+entrypoint = "App.tsx"
+
+dependencies {
+  npm {
+    packages {
+      "react@18"
+      "react-dom@18"
+    }
+  }
+  
+}

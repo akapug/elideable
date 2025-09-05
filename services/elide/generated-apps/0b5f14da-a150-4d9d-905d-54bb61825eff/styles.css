@@ -1,0 +1,19 @@
+.app {
+    text-align: center;
+    padding: 20px;
+}
+
+button {
+    padding: 10px 20px;
+    font-size: 16px;
+    cursor: pointer;
+    background: #0077ff;
+    color: white;
+    border: none;
+    border-radius: 4px;
+}
+
+p {
+    font-size: 24px;
+    margin-top: 20px;
+}

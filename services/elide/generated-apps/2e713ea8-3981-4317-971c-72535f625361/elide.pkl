@@ -1,0 +1,17 @@
+amends "elide:project.pkl"
+
+name = "I'll create an ASCII art ELIDE logo generator using multiple languages. TypeScript for the frontend display, Python for ASCII art generation, and Kotlin for optimized string manipulation. This demonstrates Elide's polyglot capabilities in a fun way."
+description = "Generated Elide polyglot application"
+version = "1.0.0"
+
+entrypoint = "App.tsx"
+
+dependencies {
+  npm {
+    packages {
+      "react@18"
+      "react-dom@18"
+    }
+  }
+  
+}

@@ -1,0 +1,6 @@
+
+amends "elide:project.pkl"
+
+name = "hello-elide-app"
+description = "A simple hello world app"
+version = "1.0.0"

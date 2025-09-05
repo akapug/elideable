@@ -4,12 +4,17 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import Anthropic from '@anthropic-ai/sdk';
+import crypto from 'node:crypto';
 
 const ROOT = process.cwd();
-const GENERATED_DIR = path.join(ROOT, 'apps', 'web', 'src', 'generated');
+const GENERATED_APPS_DIR = path.join(ROOT, 'generated-apps');
 
 const PORT = Number(process.env.PORT_ELIDE || 8787);
 const PROVIDER = process.env.ELV_PROVIDER || 'openrouter';
+
+// Track running Elide processes
+const runningApps = new Map(); // appId -> { process, port, url }
+let nextPort = 9000;
 
 // Initialize AI providers
 let genAI, anthropic, openrouterKey;
@@ -31,6 +36,7 @@ if (PROVIDER === 'gemini' && geminiKey) {
 
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url || '/', `http://${req.headers.host}`);
+  console.log(`[server] ${req.method} ${url.pathname}`);
   // CORS for local dev
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
@@ -45,8 +51,10 @@ const server = http.createServer(async (req, res) => {
   }
   if (url.pathname === '/api/ai/plan' && req.method === 'POST') {
     const body = await readJSON(req, res);
+    console.log('[ai] Planning request:', body?.prompt, 'with model:', body?.model);
     try {
       const result = await generatePlan(body?.prompt || 'Create a simple app', body?.model);
+      console.log('[ai] Generated plan:', JSON.stringify(result, null, 2));
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(result));
     } catch (error) {
@@ -58,21 +66,60 @@ const server = http.createServer(async (req, res) => {
   }
   if (url.pathname === '/api/ai/apply' && req.method === 'POST') {
     const body = await readJSON(req, res);
+    const { files, appName } = body;
+
+    // Generate unique app ID
+    const appId = crypto.randomUUID();
+
     try {
-      const changed = await applyFiles(body?.files || []);
+      // Create isolated Elide app
+      const { appDir, changed } = await createIsolatedApp(appId, files || [], appName || 'Generated App');
+
+      // Start the Elide app
+      const { port, url } = await startElideApp(appId, appDir);
+
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ changed }));
+      res.end(JSON.stringify({
+        appId,
+        changed,
+        previewUrl: url,
+        port
+      }));
     } catch (error) {
-      console.error('AI Apply error:', error);
+      console.error('[elide] Failed to create/start app:', error);
       res.writeHead(500, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: error.message }));
     }
     return;
   }
-  if (url.pathname === '/api/files/tree' && req.method === 'GET') {
-    const tree = await readTree();
+  if (url.pathname === '/api/preview' && req.method === 'GET') {
+    const appId = url.searchParams.get('appId');
+    if (!appId) {
+      res.writeHead(400); res.end('Missing appId parameter'); return;
+    }
+
+    const appUrl = getAppUrl(appId);
+    if (!appUrl) {
+      res.writeHead(404); res.end('App not found or not running'); return;
+    }
+
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ tree }));
+    res.end(JSON.stringify({ url: appUrl }));
+    return;
+  }
+  if (url.pathname === '/api/files/tree' && req.method === 'GET') {
+    const appId = url.searchParams.get('appId');
+    if (appId) {
+      // Get tree for specific app
+      const tree = await readAppTree(appId);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ tree }));
+    } else {
+      // Legacy: get tree from old generated directory
+      const tree = await readTree();
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ tree }));
+    }
     return;
   }
 
@@ -196,11 +243,24 @@ Example file structure:
     text = data.choices[0].message.content;
   }
 
-  // Parse JSON response
+  // Parse JSON response - handle template literals
   try {
-    const parsed = JSON.parse(text);
+    // Replace template literals with regular strings for JSON parsing
+    // Handle multiline template literals with proper escaping
+    const cleanedText = text.replace(/`([^`]*)`/gs, (match, content) => {
+      // Escape quotes and newlines in the content
+      const escaped = content
+        .replace(/\\/g, '\\\\')
+        .replace(/"/g, '\\"')
+        .replace(/\n/g, '\\n')
+        .replace(/\r/g, '\\r')
+        .replace(/\t/g, '\\t');
+      return `"${escaped}"`;
+    });
+    const parsed = JSON.parse(cleanedText);
     return { plan: parsed, diffs: [] };
   } catch (e) {
+    console.warn('JSON parse error:', e.message);
     return { plan: { message: text, prompt }, diffs: [] };
   }
 }
@@ -210,6 +270,8 @@ Example file structure:
 async function executePolyglotCode(req, res) {
   const body = await readJSON(req, res);
   const { language, code, function: funcName, args = [] } = body;
+
+  console.log(`[polyglot] Executing ${language} function: ${funcName}(${JSON.stringify(args)})`);
 
   try {
     let result;
@@ -288,26 +350,311 @@ async function simulateKotlinExecution(code, funcName, args) {
   return `Kotlin executed: ${funcName}(${args.join(', ')})`;
 }
 
-// --- File apply & tree helpers ---
-async function applyFiles(files) {
-  // files: [{ name or path, content }]
-  if (!Array.isArray(files)) throw new Error('files must be an array');
-  await fs.mkdir(GENERATED_DIR, { recursive: true });
+// --- Isolated App Generation ---
+async function createIsolatedApp(appId, files, appName = 'Generated App') {
+  const appDir = path.join(GENERATED_APPS_DIR, appId);
+  await fs.mkdir(appDir, { recursive: true });
+
+  // Generate elide.pkl manifest
+  const elideManifest = generateElideManifest(appName, files);
+  await fs.writeFile(path.join(appDir, 'elide.pkl'), elideManifest, 'utf8');
+
+  // Write all source files
   const changed = [];
   for (const f of files) {
-    const rel = normalizeGeneratedPath(f.name || f.path);
-    const dest = path.join(GENERATED_DIR, rel);
+    const filePath = f.name || f.path;
+    const dest = path.join(appDir, filePath);
     await fs.mkdir(path.dirname(dest), { recursive: true });
     await fs.writeFile(dest, f.content ?? f.contents ?? '', 'utf8');
-    changed.push(rel);
+    changed.push(filePath);
   }
-  return changed;
+
+  return { appDir, changed };
 }
 
-function normalizeGeneratedPath(p) {
-  if (!p) throw new Error('file missing name/path');
-  // strip leading src/ if present and map to generated/
-  return p.replace(/^src\//, '').replace(/^\.\//, '');
+function generateElideManifest(appName, files) {
+  // Detect entrypoints from files
+  const entrypoints = [];
+  const dependencies = {
+    npm: { packages: [] },
+    pip: { packages: [] },
+    maven: { packages: [] }
+  };
+
+  for (const file of files) {
+    const fileName = file.name || file.path;
+    const content = file.content || file.contents || '';
+
+    // Detect entrypoints
+    if (fileName.includes('server') || fileName.includes('main') || fileName.includes('app')) {
+      if (fileName.endsWith('.ts') || fileName.endsWith('.tsx') || fileName.endsWith('.js')) {
+        entrypoints.push(fileName);
+      }
+    }
+
+    // Detect dependencies from imports
+    if (content.includes('import') && (fileName.endsWith('.ts') || fileName.endsWith('.tsx'))) {
+      if (content.includes('react')) dependencies.npm.packages.push('react@18', 'react-dom@18');
+      if (content.includes('@types/')) dependencies.npm.packages.push('@types/node@^18.11.18');
+    }
+    if (content.includes('import') && fileName.endsWith('.py')) {
+      if (content.includes('numpy')) dependencies.pip.packages.push('numpy');
+      if (content.includes('pandas')) dependencies.pip.packages.push('pandas');
+    }
+  }
+
+  // Default entrypoint if none detected
+  if (entrypoints.length === 0) {
+    const tsFiles = files.filter(f => (f.name || f.path).endsWith('.ts') || (f.name || f.path).endsWith('.tsx'));
+    if (tsFiles.length > 0) {
+      entrypoints.push(tsFiles[0].name || tsFiles[0].path);
+    }
+  }
+
+  return `amends "elide:project.pkl"
+
+name = "${appName.replace(/"/g, '\\"')}"
+description = "Generated Elide polyglot application"
+version = "1.0.0"
+
+${entrypoints.length > 0 ? `entrypoint = "${entrypoints[0]}"` : ''}
+
+dependencies {
+  ${dependencies.npm.packages.length > 0 ? `npm {
+    packages {
+      ${dependencies.npm.packages.map(pkg => `"${pkg}"`).join('\n      ')}
+    }
+  }` : ''}
+  ${dependencies.pip.packages.length > 0 ? `pip {
+    packages {
+      ${dependencies.pip.packages.map(pkg => `"${pkg}"`).join('\n      ')}
+    }
+  }` : ''}
+}`;
+}
+
+// --- Process Management ---
+async function startElideApp(appId, appDir) {
+  // Stop existing app if running
+  await stopElideApp(appId);
+
+  const port = nextPort++;
+  console.log(`[elide] Starting app ${appId} on port ${port}...`);
+
+  return new Promise((resolve, reject) => {
+    // Try to use Elide CLI first, fallback to Node.js server
+    let process;
+
+    // Check if elide command is available
+    const checkElide = spawn('which', ['elide'], { stdio: 'pipe' });
+
+    checkElide.on('exit', (code) => {
+      if (code === 0) {
+        // Elide CLI is available
+        console.log(`[elide] Using Elide CLI for app ${appId}`);
+        process = spawn('elide', ['serve', '--port', port.toString()], {
+          cwd: appDir,
+          stdio: ['pipe', 'pipe', 'pipe']
+        });
+      } else {
+        // Fallback to Node.js server
+        console.log(`[elide] Elide CLI not found, using Node.js fallback for app ${appId}`);
+        process = spawn('node', ['-e', createNodeServerScript(appDir, port)], {
+          cwd: appDir,
+          stdio: ['pipe', 'pipe', 'pipe']
+        });
+      }
+
+      setupProcessHandlers(process, appId, port, resolve, reject);
+    });
+
+    checkElide.on('error', () => {
+      // Fallback to Node.js server
+      console.log(`[elide] Using Node.js fallback for app ${appId}`);
+      process = spawn('node', ['-e', createNodeServerScript(appDir, port)], {
+        cwd: appDir,
+        stdio: ['pipe', 'pipe', 'pipe']
+      });
+
+      setupProcessHandlers(process, appId, port, resolve, reject);
+    });
+  });
+}
+
+function createNodeServerScript(appDir, port) {
+  return `
+const http = require('http');
+const fs = require('fs');
+const path = require('path');
+
+const APP_DIR = process.cwd();
+const PORT = ${port};
+
+const server = http.createServer((req, res) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+
+  if (req.method === 'OPTIONS') {
+    res.writeHead(204);
+    res.end();
+    return;
+  }
+
+  if (req.url === '/') {
+    const html = '<!DOCTYPE html>' +
+      '<html><head><title>Elide App Preview</title>' +
+      '<style>body{font-family:system-ui;margin:40px;background:#0f172a;color:#e2e8f0}' +
+      '.container{max-width:800px;margin:0 auto}' +
+      '.status{background:#1e293b;padding:20px;border-radius:8px;margin-bottom:20px}' +
+      '.files{background:#1e293b;padding:20px;border-radius:8px}' +
+      'pre{background:#0f172a;padding:15px;border-radius:4px;overflow-x:auto}</style>' +
+      '</head><body><div class="container">' +
+      '<div class="status"><h1>🚀 Elide App Preview</h1>' +
+      '<p>Your polyglot Elide application is running!</p>' +
+      '<p><strong>Port:</strong> ' + PORT + '</p>' +
+      '<p><strong>Directory:</strong> ' + APP_DIR + '</p></div>' +
+      '<div class="files"><h2>📁 Generated Files</h2>' +
+      '<div id="file-list">Loading...</div></div></div>' +
+      '<script>fetch("/api/files").then(r=>r.json()).then(files=>{' +
+      'document.getElementById("file-list").innerHTML=files.map(f=>' +
+      '"<div><strong>"+f.name+"</strong><pre>"+f.content+"</pre></div>"' +
+      ').join("");})</script></body></html>';
+
+    res.writeHead(200, { 'Content-Type': 'text/html' });
+    res.end(html);
+    return;
+  }
+
+  if (req.url === '/api/files') {
+    const files = [];
+    try {
+      const entries = fs.readdirSync(APP_DIR);
+      for (const entry of entries) {
+        if (entry.startsWith('.')) continue;
+        const fullPath = path.join(APP_DIR, entry);
+        const stat = fs.statSync(fullPath);
+        if (stat.isFile()) {
+          const content = fs.readFileSync(fullPath, 'utf8');
+          files.push({ name: entry, content });
+        }
+      }
+    } catch (err) {
+      console.error('Error reading files:', err);
+    }
+
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(files));
+    return;
+  }
+
+  res.writeHead(404);
+  res.end('Not Found');
+});
+
+server.listen(PORT, () => {
+  console.log('Server started on port ' + PORT);
+});
+`;
+}
+
+function setupProcessHandlers(process, appId, port, resolve, reject) {
+  let started = false;
+  const timeout = setTimeout(() => {
+    if (!started) {
+      process.kill();
+      reject(new Error(`App ${appId} failed to start within 30 seconds`));
+    }
+  }, 30000);
+
+  process.stdout.on('data', (data) => {
+    const output = data.toString();
+    console.log(`[elide:${appId}] ${output.trim()}`);
+
+    // Look for server started indicators
+    if (output.includes('Serving') || output.includes('Server started') || output.includes(`port ${port}`) || output.includes('listening')) {
+      if (!started) {
+        started = true;
+        clearTimeout(timeout);
+        const url = `http://localhost:${port}`;
+        runningApps.set(appId, { process, port, url });
+        console.log(`[elide] App ${appId} started at ${url}`);
+        resolve({ port, url });
+      }
+    }
+  });
+
+  process.stderr.on('data', (data) => {
+    console.error(`[elide:${appId}] ERROR: ${data.toString().trim()}`);
+  });
+
+  process.on('exit', (code) => {
+    console.log(`[elide] App ${appId} exited with code ${code}`);
+    runningApps.delete(appId);
+    clearTimeout(timeout);
+    if (!started) {
+      reject(new Error(`App ${appId} exited with code ${code} before starting`));
+    }
+  });
+
+  process.on('error', (err) => {
+    console.error(`[elide] Failed to start app ${appId}:`, err);
+    clearTimeout(timeout);
+    reject(err);
+  });
+}
+
+async function stopElideApp(appId) {
+  const app = runningApps.get(appId);
+  if (app) {
+    console.log(`[elide] Stopping app ${appId}...`);
+    app.process.kill();
+    runningApps.delete(appId);
+  }
+}
+
+function getAppUrl(appId) {
+  const app = runningApps.get(appId);
+  return app ? app.url : null;
+}
+
+async function readAppTree(appId) {
+  const appDir = path.join(GENERATED_APPS_DIR, appId);
+  try {
+    return await readTreeFromDir(appDir);
+  } catch (error) {
+    console.error(`[elide] Failed to read app tree for ${appId}:`, error);
+    return [];
+  }
+}
+
+async function readTreeFromDir(dir) {
+  const tree = [];
+  try {
+    const entries = await fs.readdir(dir, { withFileTypes: true });
+    for (const entry of entries) {
+      if (entry.name.startsWith('.')) continue; // Skip hidden files
+
+      const fullPath = path.join(dir, entry.name);
+      const relativePath = path.relative(path.join(GENERATED_APPS_DIR), fullPath);
+
+      if (entry.isDirectory()) {
+        tree.push({
+          path: relativePath,
+          type: 'dir',
+          children: await readTreeFromDir(fullPath)
+        });
+      } else {
+        tree.push({
+          path: relativePath,
+          type: 'file'
+        });
+      }
+    }
+  } catch (error) {
+    console.error(`[elide] Failed to read directory ${dir}:`, error);
+  }
+  return tree;
 }
 
 async function readTree() {

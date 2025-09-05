@@ -1,14 +1,12 @@
 import React, { useState } from 'react';
 
 interface EditorProps {
+  content?: string;
   onChange: (content: string) => void;
 }
 
-const Editor: React.FC<EditorProps> = ({ onChange }) => {
-  const [content, setContent] = useState('');
-
+const Editor: React.FC<EditorProps> = ({ content = '', onChange }) => {
   const handleChange = (event: React.ChangeEvent<HTMLTextAreaElement>) => {
-    setContent(event.target.value);
     onChange(event.target.value);
   };
 
@@ -16,7 +14,16 @@ const Editor: React.FC<EditorProps> = ({ onChange }) => {
     <textarea
       value={content}
       onChange={handleChange}
-      style={{ flex: 1, padding: '10px', border: '1px solid #ccc' }}
+      placeholder="Type your note here... Use #hashtags for tags"
+      style={{
+        width: '100%',
+        height: '120px',
+        padding: '10px',
+        border: '1px solid #ccc',
+        borderRadius: '4px',
+        fontSize: '14px',
+        fontFamily: 'Arial, sans-serif'
+      }}
     />
   );
 };

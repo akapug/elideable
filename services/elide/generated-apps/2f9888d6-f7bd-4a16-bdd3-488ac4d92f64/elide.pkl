@@ -1,0 +1,17 @@
+amends "elide:project.pkl"
+
+name = "Hello Elide Test App"
+description = "Generated Elide polyglot application"
+version = "1.0.0"
+
+entrypoint = "src/App.tsx"
+
+dependencies {
+  npm {
+    packages {
+      "react@18"
+      "react-dom@18"
+    }
+  }
+  
+}
