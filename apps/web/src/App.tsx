@@ -1,5 +1,22 @@
-import { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import './index.css';
+function GeneratedPreview({ version = 0 }: { version?: number }) {
+  const [Comp, setComp] = useState<React.ComponentType | null>(null);
+  useEffect(() => {
+    import(`./generated/App?v=${version}`)
+      .then((m) => setComp(() => m.default))
+      .catch(() => setComp(null));
+  }, [version]);
+  if (!Comp) {
+    return (
+      <div className="h-full flex items-center justify-center text-slate-400">
+        No generated app yet. Click Apply after planning.
+      </div>
+    );
+  }
+  return <Comp />;
+}
+
 
 interface Message {
   id: string;
@@ -48,6 +65,20 @@ export default function App() {
   ]);
   const [input, setInput] = useState('Create a notes app with tags, editor, and preview.');
   const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState<any>(null);
+  const [fileTree, setFileTree] = useState<Array<{type: 'file' | 'dir'; path: string}>>([]);
+
+  async function refreshTree() {
+    try {
+      const resp = await fetch('http://localhost:8787/api/files/tree');
+      const json = await resp.json();
+      setFileTree(json.tree || []);
+    } catch {}
+  }
+
+  useEffect(() => {
+    refreshTree();
+  }, []);
 
   async function sendMessage() {
     if (!input.trim() || busy) return;
@@ -70,6 +101,7 @@ export default function App() {
         body: JSON.stringify({ prompt: userMessage.content }),
       });
       const json = await resp.json();
+      setResult(json);
 
       const assistantMessage: Message = {
         id: (Date.now() + 1).toString(),
@@ -116,10 +148,74 @@ export default function App() {
                     </div>
                   </div>
                 )}
-              </div>
               <div className="p-4 border-t border-slate-700/50">
-                <div className="flex space-x-2">
+                <div className="flex flex-wrap items-center gap-2">
                   <input
+                    type="text"
+                    value={input}
+                    onChange={(e) => setInput(e.target.value)}
+                    onKeyDown={(e) => e.key === 'Enter' && sendMessage()}
+                    placeholder="Describe your app..."
+                    className="flex-1 px-4 py-3 bg-slate-800/80 border border-slate-700/50 rounded-xl text-sm placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500/50"
+                    disabled={busy}
+                  />
+                  <button
+                    onClick={sendMessage}
+                    disabled={busy || !input.trim()}
+                    className="px-6 py-3 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 disabled:cursor-not-allowed rounded-xl text-sm font-medium transition-colors"
+                  >
+                    Send
+                  </button>
+                  {result?.plan?.files?.length ? (
+                    <button
+                      onClick={async () => {
+                        const resp = await fetch('http://localhost:8787/api/ai/apply', {
+                          method: 'POST',
+                          headers: { 'Content-Type': 'application/json' },
+                          body: JSON.stringify({ files: result.plan.files.map((f: {name?: string; path?: string; content?: string; contents?: string }) => ({ name: f.name || f.path, content: f.content || f.contents })) })
+                        });
+                        const json = await resp.json();
+                        console.log('Applied', json);
+                        await refreshTree();
+                      }}
+                      className="px-4 py-3 bg-emerald-600 hover:bg-emerald-500 rounded-xl text-sm font-medium transition-colors"
+                    >Apply</button>
+                  ) : null}
+                </div>
+              </div>
+            </div>
+          </Pane>
+        </div>
+        <div className="col-span-6">
+          <Pane title="Live Preview">
+            <div className="p-4 h-full">
+              <div className="w-full h-full bg-slate-800/50 rounded-xl border border-slate-700/50 text-slate-200">
+                <GeneratedPreview version={fileTree.length} />
+              </div>
+            </div>
+          </Pane>
+        </div>
+        <div className="col-span-3">
+          <Pane title="Files">
+            <div className="p-4 text-slate-400 text-sm">
+              {fileTree.length ? (
+                <ul className="space-y-1">
+                  {fileTree.map((n) => (
+                    <li key={n.path} className="flex items-center gap-2">
+                      <span>{n.type === 'dir' ? '📁' : '📄'}</span>
+                      <span>{n.path}</span>
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <div className="text-center">
+                  <div className="text-2xl mb-2">📁</div>
+                  <div>Generated files will appear here</div>
+                </div>
+              )}
+            </div>
+          </Pane>
+        </div>
                     type="text"
                     value={input}
                     onChange={(e) => setInput(e.target.value)}
@@ -143,12 +239,8 @@ export default function App() {
         <div className="col-span-6">
           <Pane title="Live Preview">
             <div className="p-4 h-full">
-              <div className="w-full h-full bg-slate-800/50 rounded-xl border border-slate-700/50 flex items-center justify-center text-slate-400">
-                <div className="text-center">
-                  <div className="text-4xl mb-4">🚀</div>
-                  <div className="text-lg font-medium mb-2">Your app will appear here</div>
-                  <div className="text-sm">Start by describing what you want to build</div>
-                </div>
+              <div className="w-full h-full bg-slate-800/50 rounded-xl border border-slate-700/50 text-slate-200">
+                <GeneratedPreview />
               </div>
             </div>
           </Pane>
