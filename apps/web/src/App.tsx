@@ -22,7 +22,7 @@ function GeneratedPreview({ previewUrl }: { previewUrl?: string }) {
   if (!previewUrl) {
     return (
       <div className="h-full flex items-center justify-center text-slate-400">
-        No generated app yet. Click Apply after planning.
+        No generated app yet. Describe an app to get started!
       </div>
     );
   }
@@ -106,7 +106,7 @@ export default function App() {
   ]);
   const [input, setInput] = useState('Create a notes app with tags, editor, and preview.');
   const [busy, setBusy] = useState(false);
-  const [result, setResult] = useState<any>(null);
+
   const [fileTree, setFileTree] = useState<Array<{type: 'file' | 'dir'; path: string}>>([]);
   const [isListening, setIsListening] = useState(false);
   const [speechSupported, setSpeechSupported] = useState(false);
@@ -185,12 +185,13 @@ export default function App() {
       content: input.trim(),
       timestamp: new Date()
     };
-    
+
     setMessages(prev => [...prev, userMessage]);
     setInput('');
     setBusy(true);
 
     try {
+      // Step 1: Generate the plan
       const resp = await fetch('http://localhost:8787/api/ai/plan', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -221,7 +222,7 @@ export default function App() {
         }
       }
 
-      setResult(parsedResult);
+
 
       const assistantMessage: Message = {
         id: (Date.now() + 1).toString(),
@@ -231,6 +232,68 @@ export default function App() {
       };
 
       setMessages(prev => [...prev, assistantMessage]);
+
+      // Step 2: If we have diffs, automatically create the app
+      if (json.diffs && json.diffs.length > 0) {
+        const creatingMessage: Message = {
+          id: (Date.now() + 2).toString(),
+          role: 'assistant',
+          content: '🚀 Creating your app...',
+          timestamp: new Date()
+        };
+        setMessages(prev => [...prev, creatingMessage]);
+
+        try {
+          const applyResp = await fetch('http://localhost:8787/api/ai/apply', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              files: json.diffs,
+              appName: userMessage.content.substring(0, 50)
+            })
+          });
+
+          if (!applyResp.ok) {
+            throw new Error(`Apply failed: HTTP ${applyResp.status}`);
+          }
+
+          const applyData = await applyResp.json();
+          console.log('Applied', applyData);
+
+          if (applyData.previewUrl) {
+            setPreviewUrl(applyData.previewUrl);
+            setCurrentAppId(applyData.appId);
+
+            const successMessage: Message = {
+              id: (Date.now() + 3).toString(),
+              role: 'assistant',
+              content: `✅ App created successfully! Your polyglot Elide app is now running in the preview.`,
+              timestamp: new Date()
+            };
+            setMessages(prev => [...prev, successMessage]);
+
+            // Refresh the file tree
+            await refreshTree();
+          } else if (applyData.error) {
+            const errorMessage: Message = {
+              id: (Date.now() + 3).toString(),
+              role: 'assistant',
+              content: `❌ Error creating app: ${applyData.error}`,
+              timestamp: new Date()
+            };
+            setMessages(prev => [...prev, errorMessage]);
+          }
+        } catch (applyError) {
+          console.error('Apply error:', applyError);
+          const errorMessage: Message = {
+            id: (Date.now() + 3).toString(),
+            role: 'assistant',
+            content: `❌ Error creating app: ${String(applyError)}`,
+            timestamp: new Date()
+          };
+          setMessages(prev => [...prev, errorMessage]);
+        }
+      }
 
       // Speak the response
       if (parsedResult.plan?.summary) {
@@ -320,59 +383,7 @@ export default function App() {
                   >
                     Send
                   </button>
-                  {result?.plan?.files?.length ? (
-                    <button
-                      onClick={async () => {
-                        setBusy(true);
-                        try {
-                          const resp = await fetch('http://localhost:8787/api/ai/apply', {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({
-                              files: result.plan.files.map((f: {name?: string; path?: string; content?: string; contents?: string }) => ({
-                                name: f.name || f.path,
-                                content: f.content || f.contents
-                              })),
-                              appName: result.plan.summary || 'Generated App'
-                            })
-                          });
-                          const json = await resp.json();
-                          console.log('Applied', json);
 
-                          if (json.previewUrl) {
-                            setPreviewUrl(json.previewUrl);
-                            setCurrentAppId(json.appId);
-
-                            // Add success message
-                            const successMessage: Message = {
-                              id: Date.now().toString(),
-                              role: 'assistant',
-                              content: `✅ App deployed successfully! Preview available at ${json.previewUrl}`,
-                              timestamp: new Date()
-                            };
-                            setMessages(prev => [...prev, successMessage]);
-                          }
-
-                          await refreshTree();
-                        } catch (error) {
-                          console.error('Apply failed:', error);
-                          const errorMessage: Message = {
-                            id: Date.now().toString(),
-                            role: 'assistant',
-                            content: `❌ Failed to deploy app: ${error instanceof Error ? error.message : 'Unknown error'}`,
-                            timestamp: new Date()
-                          };
-                          setMessages(prev => [...prev, errorMessage]);
-                        } finally {
-                          setBusy(false);
-                        }
-                      }}
-                      disabled={busy}
-                      className="px-4 py-3 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 disabled:cursor-not-allowed rounded-xl text-sm font-medium transition-colors"
-                    >
-                      {busy ? 'Deploying...' : 'Apply'}
-                    </button>
-                  ) : null}
                 </div>
               </div>
             </div>
@@ -395,7 +406,17 @@ export default function App() {
                   {fileTree.map((n) => (
                     <li key={n.path} className="flex items-center gap-2">
                       <span>{n.type === 'dir' ? '📁' : '📄'}</span>
-                      <span>{n.path}</span>
+                      {n.type === 'file' ? (
+                        <button
+                          onClick={() => openFileInSystem(n.path)}
+                          className="text-left hover:text-blue-400 hover:underline cursor-pointer transition-colors"
+                          title="Click to open in system editor"
+                        >
+                          {n.path}
+                        </button>
+                      ) : (
+                        <span>{n.path}</span>
+                      )}
                     </li>
                   ))}
                 </ul>

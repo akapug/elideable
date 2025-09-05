@@ -243,22 +243,123 @@ Example file structure:
     text = data.choices[0].message.content;
   }
 
-  // Parse JSON response - handle template literals
+  // Parse JSON response - handle Claude 4.0 Sonnet's complex format
   try {
-    // Replace template literals with regular strings for JSON parsing
-    // Handle multiline template literals with proper escaping
-    const cleanedText = text.replace(/`([^`]*)`/gs, (match, content) => {
-      // Escape quotes and newlines in the content
-      const escaped = content
-        .replace(/\\/g, '\\\\')
-        .replace(/"/g, '\\"')
-        .replace(/\n/g, '\\n')
-        .replace(/\r/g, '\\r')
-        .replace(/\t/g, '\\t');
-      return `"${escaped}"`;
-    });
-    const parsed = JSON.parse(cleanedText);
-    return { plan: parsed, diffs: [] };
+    let parsed = null;
+    let diffs = [];
+
+    // Safety check for text
+    if (!text || typeof text !== 'string') {
+      console.log('Invalid or empty response text');
+      return { plan: { message: 'No response received', prompt }, diffs: [] };
+    }
+
+    // Check if response is ONLY markdown code blocks (not JSON structure)
+    if (text.includes('```') && !text.includes('```json') && !text.includes('"files"') && !text.includes('"name"')) {
+      console.log('Response contains only code blocks, no JSON structure, treating as plain text');
+      return { plan: { message: text, prompt }, diffs: [] };
+    }
+
+    // Try to extract JSON from markdown code block first
+    const jsonMatch = text.match(/```json\s*([\s\S]*?)\s*```/);
+    if (jsonMatch) {
+      try {
+        // Claude 4.0 Sonnet returns complex nested JSON - use a more robust approach
+        const jsonText = jsonMatch[1];
+
+        // Try parsing directly first
+        try {
+          parsed = JSON.parse(jsonText);
+        } catch (directParseError) {
+          // If direct parsing fails, try to fix common issues
+          console.log('Direct JSON parse failed, attempting to fix format...');
+
+          // Extract files using a more robust approach
+          // Look for file objects with either "name" or "path" fields
+          const filePattern = /\{\s*"(?:name|path)":\s*"([^"]+)",\s*"content":\s*"((?:[^"\\]|\\[\s\S])*?)"\s*\}/g;
+          let match;
+          while ((match = filePattern.exec(jsonText)) !== null) {
+            const fileName = match[1];
+            let content = match[2];
+
+            // Unescape the content more thoroughly
+            content = content
+              .replace(/\\n/g, '\n')
+              .replace(/\\t/g, '\t')
+              .replace(/\\r/g, '\r')
+              .replace(/\\"/g, '"')
+              .replace(/\\\\/g, '\\');
+
+            diffs.push({
+              name: fileName,
+              content: content
+            });
+          }
+
+          // If no files found with the above pattern, try a simpler approach
+          if (diffs.length === 0) {
+            const simpleFilePattern = /"(?:name|path)":\s*"([^"]+)"[\s\S]*?"content":\s*"((?:[^"\\]|\\[\s\S])*?)"/g;
+            let simpleMatch;
+            while ((simpleMatch = simpleFilePattern.exec(jsonText)) !== null) {
+              const fileName = simpleMatch[1];
+              let content = simpleMatch[2];
+
+              content = content
+                .replace(/\\n/g, '\n')
+                .replace(/\\t/g, '\t')
+                .replace(/\\r/g, '\r')
+                .replace(/\\"/g, '"')
+                .replace(/\\\\/g, '\\');
+
+              diffs.push({
+                name: fileName,
+                content: content
+              });
+            }
+          }
+
+          // Create a simple parsed object for the summary
+          const summaryMatch = jsonText.match(/"summary":\s*"([^"]+)"/);
+          parsed = {
+            summary: summaryMatch ? summaryMatch[1] : "I'll create your app with the specified features."
+          };
+        }
+      } catch (e) {
+        console.warn('Failed to parse JSON from markdown:', e.message);
+      }
+    }
+
+    // If we still don't have parsed data, try the old method
+    if (!parsed) {
+      const cleanedText = text.replace(/`([^`]*)`/gs, (match, content) => {
+        const escaped = content
+          .replace(/\\/g, '\\\\')
+          .replace(/"/g, '\\"')
+          .replace(/\n/g, '\\n')
+          .replace(/\r/g, '\\r')
+          .replace(/\t/g, '\\t');
+        return `"${escaped}"`;
+      });
+      parsed = JSON.parse(cleanedText);
+    }
+
+    // If we haven't extracted diffs yet, try from parsed object
+    if (diffs.length === 0 && parsed && parsed.files && Array.isArray(parsed.files)) {
+      diffs = parsed.files.map(file => ({
+        name: file.path || file.name,
+        content: file.content
+      }));
+    }
+
+    // Return short summary for chat and files for deployment
+    const summary = parsed?.summary || "I'll create your app with the specified features.";
+
+    console.log(`Extracted ${diffs.length} files for deployment`);
+
+    return {
+      plan: { message: summary, prompt },
+      diffs: diffs
+    };
   } catch (e) {
     console.warn('JSON parse error:', e.message);
     return { plan: { message: text, prompt }, diffs: [] };

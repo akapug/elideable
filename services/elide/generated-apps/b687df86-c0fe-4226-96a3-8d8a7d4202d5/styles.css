@@ -1,0 +1,103 @@
+.app {
+  text-align: center;
+  font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.app-header {
+  background: rgba(255, 255, 255, 0.95);
+  padding: 2rem;
+  border-radius: 20px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.2);
+  backdrop-filter: blur(10px);
+  max-width: 500px;
+  width: 90%;
+}
+
+.app-header h1 {
+  color: #333;
+  margin-bottom: 1.5rem;
+  font-size: 2rem;
+}
+
+.greeting-card {
+  background: #f8f9fa;
+  padding: 1.5rem;
+  border-radius: 15px;
+  margin: 1.5rem 0;
+  border-left: 4px solid #667eea;
+}
+
+.greeting-text {
+  font-size: 1.5rem;
+  color: #333;
+  margin: 0 0 0.5rem 0;
+  font-weight: 500;
+}
+
+.greeting-meta {
+  color: #666;
+  font-style: italic;
+}
+
+.tech-stack {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  justify-content: center;
+  margin-top: 1.5rem;
+}
+
+.tech-badge {
+  padding: 0.3rem 0.8rem;
+  border-radius: 20px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.tech-badge.tsx {
+  background: #007acc;
+  color: white;
+}
+
+.tech-badge.python {
+  background: #3776ab;
+  color: white;
+}
+
+.tech-badge.kotlin {
+  background: #7f52ff;
+  color: white;
+}
+
+.tech-badge.js {
+  background: #f7df1e;
+  color: #333;
+}
+
+.loading {
+  color: white;
+  font-size: 1.2rem;
+  text-align: center;
+}
+
+@media (max-width: 600px) {
+  .app-header {
+    padding: 1.5rem;
+    margin: 1rem;
+  }
+  
+  .app-header h1 {
+    font-size: 1.5rem;
+  }
+  
+  .greeting-text {
+    font-size: 1.2rem;
+  }
+}
