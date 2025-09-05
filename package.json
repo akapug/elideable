@@ -1,0 +1,25 @@
+{
+  "name": "elovable",
+  "private": true,
+  "version": "0.0.1",
+  "description": "Elovable: chat-to-app platform powered by Elide (polyglot).",
+  "packageManager": "pnpm@10.13.1",
+  "workspaces": [
+    "apps/*",
+    "services/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "pnpm -w run dev:all",
+    "dev:all": "concurrently -n elide,web -c blue,green \"pnpm --filter ./services/elide dev\" \"pnpm --filter ./apps/web dev\"",
+    "build": "pnpm -w run build:all",
+    "build:all": "pnpm -r run build",
+    "lint": "pnpm -r run lint",
+    "format": "prettier -w .",
+    "test": "pnpm -r run test"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.0",
+    "prettier": "^3.3.3"
+  }
+}
