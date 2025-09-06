@@ -1,0 +1,12 @@
+amends "elide:project.pkl"
+
+name = "test-app"
+description = "Generated Elide polyglot application"
+version = "1.0.0"
+
+
+
+dependencies {
+  
+  
+}

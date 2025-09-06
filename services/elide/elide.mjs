@@ -344,10 +344,19 @@ Keep responses conversational and focused on guidance rather than implementation
     });
 
     if (!response.ok) {
-      throw new Error(`OpenRouter API error: ${response.status}`);
+      const errorText = await response.text();
+      console.error(`[ai] OpenRouter API error ${response.status}:`, errorText);
+      throw new Error(`OpenRouter API error: ${response.status} - ${errorText}`);
     }
 
     const data = await response.json();
+    console.log('[ai] OpenRouter response:', JSON.stringify(data, null, 2));
+
+    if (!data.choices || !data.choices[0] || !data.choices[0].message) {
+      console.error('[ai] Invalid OpenRouter response structure:', data);
+      throw new Error('Invalid OpenRouter response structure');
+    }
+
     text = data.choices[0].message.content;
   }
 
@@ -551,11 +560,14 @@ async function planWithAnthropicTools({ prompt, systemPrompt, anthropic, appId }
   for (const block of response.content) {
     if (block.type === 'tool_use' && block.input_json_string) {
       try {
+        console.log('[ai] Parsing tool input JSON, length:', block.input_json_string.length);
         block.input = JSON.parse(block.input_json_string);
         delete block.input_json_string; // Clean up
+        console.log('[ai] Successfully parsed tool input');
       } catch (e) {
         console.error('[ai] Failed to parse tool input JSON:', e.message);
-        console.error('[ai] Raw JSON string:', block.input_json_string);
+        console.error('[ai] Raw JSON string (first 500 chars):', block.input_json_string.substring(0, 500));
+        console.error('[ai] Raw JSON string (last 500 chars):', block.input_json_string.substring(Math.max(0, block.input_json_string.length - 500)));
         block.input = {}; // Fallback to empty object
       }
     }
