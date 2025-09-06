@@ -6,7 +6,8 @@ import { GoogleGenerativeAI } from '@google/generative-ai';
 import Anthropic from '@anthropic-ai/sdk';
 import crypto from 'node:crypto';
 
-const ROOT = process.cwd();
+// Go up two levels from services/elide to get to project root
+const ROOT = path.resolve(process.cwd(), '..', '..');
 const GENERATED_APPS_DIR = path.join(ROOT, 'generated-apps');
 
 const PORT = Number(process.env.PORT_ELIDE || 8787);

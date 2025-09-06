@@ -135,6 +135,7 @@ export default function App() {
   ]);
   const [input, setInput] = useState('Create a notes app with tags, editor, and preview.');
   const [busy, setBusy] = useState(false);
+  const [abortController, setAbortController] = useState<AbortController | null>(null);
 
   const [fileTree, setFileTree] = useState<Array<{type: 'file' | 'dir'; path: string}>>([]);
   const [isListening, setIsListening] = useState(false);
@@ -242,6 +243,12 @@ export default function App() {
     }
   }
 
+  function cancelRequest() {
+    if (abortController) {
+      abortController.abort();
+    }
+  }
+
   async function sendMessage(mode: 'chat' | 'edit' = 'edit') {
     if (!input.trim() || busy) return;
 
@@ -256,12 +263,17 @@ export default function App() {
     setInput('');
     setBusy(true);
 
+    // Create abort controller for cancellation
+    const controller = new AbortController();
+    setAbortController(controller);
+
     try {
       // Step 1: Generate the plan
       const resp = await fetch('http://localhost:8787/api/ai/plan', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ prompt: userMessage.content, model: selectedModel, mode, appId: currentAppId || undefined }),
+        signal: controller.signal
       });
       const json = await resp.json();
 
@@ -316,7 +328,8 @@ export default function App() {
             body: JSON.stringify({
               files: json.diffs,
               appName: userMessage.content.substring(0, 50)
-            })
+            }),
+            signal: controller.signal
           });
 
           if (!applyResp.ok) {
@@ -366,15 +379,26 @@ export default function App() {
         speakText(parsedResult.plan.summary);
       }
     } catch (e) {
-      const errorMessage: Message = {
-        id: (Date.now() + 1).toString(),
-        role: 'assistant',
-        content: `Error: ${String(e)}`,
-        timestamp: new Date()
-      };
-      setMessages(prev => [...prev, errorMessage]);
+      if (e instanceof Error && e.name === 'AbortError') {
+        const cancelMessage: Message = {
+          id: (Date.now() + 1).toString(),
+          role: 'assistant',
+          content: '🚫 Request cancelled by user',
+          timestamp: new Date()
+        };
+        setMessages(prev => [...prev, cancelMessage]);
+      } else {
+        const errorMessage: Message = {
+          id: (Date.now() + 1).toString(),
+          role: 'assistant',
+          content: `Error: ${String(e)}`,
+          timestamp: new Date()
+        };
+        setMessages(prev => [...prev, errorMessage]);
+      }
     } finally {
       setBusy(false);
+      setAbortController(null);
     }
   }
 
@@ -442,21 +466,33 @@ export default function App() {
                       {isListening ? '🎤 Listening...' : '🎤'}
                     </button>
                   )}
-                  <button
-                    onClick={() => sendMessage('edit')}
-                    disabled={busy || !input.trim()}
-                    className="px-6 py-3 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 disabled:cursor-not-allowed rounded-xl text-sm font-medium transition-colors"
-                  >
-                    Send
-                  </button>
-                  <button
-                    onClick={() => sendMessage('chat')}
-                    disabled={busy || !input.trim()}
-                    className="px-6 py-3 bg-slate-700 hover:bg-slate-600 disabled:opacity-50 disabled:cursor-not-allowed rounded-xl text-sm font-medium transition-colors"
-                    title="Chat-only (no file writes); plan or discuss before building"
-                  >
-                    Chat
-                  </button>
+                  {busy ? (
+                    <button
+                      onClick={cancelRequest}
+                      className="px-6 py-3 bg-red-600 hover:bg-red-500 rounded-xl text-sm font-medium transition-colors"
+                      title="Cancel current request"
+                    >
+                      Cancel
+                    </button>
+                  ) : (
+                    <>
+                      <button
+                        onClick={() => sendMessage('edit')}
+                        disabled={!input.trim()}
+                        className="px-6 py-3 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 disabled:cursor-not-allowed rounded-xl text-sm font-medium transition-colors"
+                      >
+                        Send
+                      </button>
+                      <button
+                        onClick={() => sendMessage('chat')}
+                        disabled={!input.trim()}
+                        className="px-6 py-3 bg-slate-700 hover:bg-slate-600 disabled:opacity-50 disabled:cursor-not-allowed rounded-xl text-sm font-medium transition-colors"
+                        title="Chat-only (no file writes); plan or discuss before building"
+                      >
+                        Chat
+                      </button>
+                    </>
+                  )}
 
                 </div>
               </div>
