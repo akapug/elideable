@@ -1,0 +1,17 @@
+amends "elide:project.pkl"
+
+name = "simple calculator"
+description = "Generated Elide polyglot application"
+version = "1.0.0"
+
+entrypoint = "App.tsx"
+
+dependencies {
+  npm {
+    packages {
+      "react@18"
+      "react-dom@18"
+    }
+  }
+  
+}

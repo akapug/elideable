@@ -515,7 +515,7 @@ export default function App() {
   return (
     <div className="h-screen w-screen bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950 text-slate-100">
       <div className="grid grid-cols-12 gap-4 p-4 h-full">
-        <div className="col-span-3">
+        <div className="col-span-4">
           <Pane title="Chat">
             <div className="flex flex-col h-full">
               <div className="flex-1 overflow-y-auto p-4 space-y-1 max-h-[calc(100vh-300px)]">
@@ -609,7 +609,7 @@ export default function App() {
             </div>
           </Pane>
         </div>
-        <div className="col-span-6">
+        <div className="col-span-8">
           <Pane title={
             <div className="flex items-center justify-between w-full">
               <span>{viewMode === 'preview' ? 'Live Preview' : 'Code Editor'}</span>
@@ -645,37 +645,6 @@ export default function App() {
                   <CodeEditor currentAppId={currentAppId} fileTree={fileTree} />
                 )}
               </div>
-            </div>
-          </Pane>
-        </div>
-        <div className="col-span-3">
-          <Pane title="Files">
-            <div className="p-4 text-slate-400 text-sm">
-              {fileTree.length ? (
-                <ul className="space-y-1">
-                  {fileTree.map((n) => (
-                    <li key={n.path} className="flex items-center gap-2">
-                      <span>{n.type === 'dir' ? '📁' : '📄'}</span>
-                      {n.type === 'file' ? (
-                        <button
-                          onClick={() => openFileInSystem(n.path)}
-                          className="text-left hover:text-blue-400 hover:underline cursor-pointer transition-colors"
-                          title="Click to open in system editor"
-                        >
-                          {n.path}
-                        </button>
-                      ) : (
-                        <span>{n.path}</span>
-                      )}
-                    </li>
-                  ))}
-                </ul>
-              ) : (
-                <div className="text-center">
-                  <div className="text-2xl mb-2">📁</div>
-                  <div>Generated files will appear here</div>
-                </div>
-              )}
             </div>
           </Pane>
         </div>

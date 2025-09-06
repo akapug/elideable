@@ -323,41 +323,48 @@ Keep responses conversational and focused on guidance rather than implementation
     const response = await result.response;
     text = response.text();
   } else if (useProvider === 'openrouter' && openrouterKey) {
-    const selectedPrompt = mode === 'chat' ? chatSystemPrompt : systemPrompt;
-    const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${openrouterKey}`,
-        'Content-Type': 'application/json',
-        'HTTP-Referer': 'http://localhost:8787',
-        'X-Title': 'Elideable'
-      },
-      body: JSON.stringify({
-        model: model || 'google/gemini-2.0-flash-exp:free',
-        messages: [
-          { role: 'system', content: selectedPrompt },
-          { role: 'user', content: prompt }
-        ],
-        max_tokens: 4000,
-        temperature: 0.7
-      })
-    });
+    if (mode !== 'chat') {
+      // Use OpenRouter with tool-calling (OpenAI format)
+      const toolPlan = await planWithOpenRouterTools({ prompt, systemPrompt, openrouterKey, model, appId: options?.appId || null });
+      return toolPlan;
+    } else {
+      // Chat mode - no tools
+      const selectedPrompt = chatSystemPrompt;
+      const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${openrouterKey}`,
+          'Content-Type': 'application/json',
+          'HTTP-Referer': 'http://localhost:8787',
+          'X-Title': 'Elideable'
+        },
+        body: JSON.stringify({
+          model: model || 'google/gemini-2.0-flash-exp:free',
+          messages: [
+            { role: 'system', content: selectedPrompt },
+            { role: 'user', content: prompt }
+          ],
+          max_tokens: 4000,
+          temperature: 0.7
+        })
+      });
 
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error(`[ai] OpenRouter API error ${response.status}:`, errorText);
-      throw new Error(`OpenRouter API error: ${response.status} - ${errorText}`);
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error(`[ai] OpenRouter API error ${response.status}:`, errorText);
+        throw new Error(`OpenRouter API error: ${response.status} - ${errorText}`);
+      }
+
+      const data = await response.json();
+      console.log('[ai] OpenRouter chat response received');
+
+      if (!data.choices || !data.choices[0] || !data.choices[0].message) {
+        console.error('[ai] Invalid OpenRouter response structure:', data);
+        throw new Error('Invalid OpenRouter response structure');
+      }
+
+      text = data.choices[0].message.content;
     }
-
-    const data = await response.json();
-    console.log('[ai] OpenRouter response:', JSON.stringify(data, null, 2));
-
-    if (!data.choices || !data.choices[0] || !data.choices[0].message) {
-      console.error('[ai] Invalid OpenRouter response structure:', data);
-      throw new Error('Invalid OpenRouter response structure');
-    }
-
-    text = data.choices[0].message.content;
   }
 
   // Parse JSON response - handle Claude 4.0 Sonnet's complex format
@@ -589,15 +596,43 @@ async function planWithAnthropicTools({ prompt, systemPrompt, anthropic, appId }
       const input = block.input || {};
       if (block.name === 'write_files') {
         let files = input.files || [];
+        console.log('[ai] Raw files input type:', typeof files);
+        console.log('[ai] Raw files input length:', typeof files === 'string' ? files.length : files.length);
+
         // Handle case where files is a JSON string instead of array
         if (typeof files === 'string') {
+          console.log('[ai] Files is string, first 200 chars:', files.substring(0, 200));
+          console.log('[ai] Files is string, last 200 chars:', files.substring(files.length - 200));
           try {
             files = JSON.parse(files);
+            console.log('[ai] Successfully parsed files JSON, got', files.length, 'files');
           } catch (e) {
             console.error('[ai] Failed to parse files JSON string:', e.message);
-            files = [];
+            console.error('[ai] JSON error at position:', e.message.match(/position (\d+)/)?.[1]);
+
+            // Try to fix common JSON issues
+            let fixedJson = files;
+
+            // Fix escaped quotes that might be breaking the JSON
+            fixedJson = fixedJson.replace(/\\"/g, '"');
+
+            // Try to find and fix the specific error location
+            if (e.message.includes('position')) {
+              const pos = parseInt(e.message.match(/position (\d+)/)?.[1] || '0');
+              console.log('[ai] Context around error position:', files.substring(Math.max(0, pos - 50), pos + 50));
+            }
+
+            try {
+              files = JSON.parse(fixedJson);
+              console.log('[ai] Successfully parsed fixed JSON, got', files.length, 'files');
+            } catch (e2) {
+              console.error('[ai] Still failed after fixing, giving up:', e2.message);
+              files = [];
+            }
           }
         }
+
+        console.log('[ai] Final files array length:', files.length);
         for (const f of files) diffs.push({ name: f.path || f.name, content: f.content ?? '' });
       }
       if (block.name === 'read_file') {
@@ -648,6 +683,125 @@ async function planWithAnthropicTools({ prompt, systemPrompt, anthropic, appId }
 
   const summary = summaryParts.join('\n\n');
   return { plan: { message: summary || 'Generated plan with proposed files/edits.', prompt }, diffs };
+}
+
+// --- Tool Planning Helpers (OpenRouter) ---
+async function planWithOpenRouterTools({ prompt, systemPrompt, openrouterKey, model, appId }) {
+  const tools = [
+    {
+      type: 'function',
+      function: {
+        name: 'write_files',
+        description: 'Create or overwrite application files with complete content. This tool should be used whenever you need to generate actual file contents for the user\'s app. You must provide the complete file content, not just snippets. Use this for creating HTML, CSS, JavaScript, Python, or any other files. The files will be written to the app directory and served to the user.',
+        parameters: {
+          type: 'object',
+          properties: {
+            files: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: {
+                  path: { type: 'string', description: 'File path relative to app root (e.g., "index.html", "src/app.js")' },
+                  content: { type: 'string', description: 'Complete file content' }
+                },
+                required: ['path', 'content']
+              }
+            }
+          },
+          required: ['files']
+        }
+      }
+    }
+  ];
+
+  console.log('[ai] Making OpenRouter tool-calling request with model:', model || 'google/gemini-2.0-flash-exp:free');
+  console.log('[ai] OpenRouter API key present:', !!openrouterKey);
+  console.log('[ai] OpenRouter API key length:', openrouterKey?.length || 0);
+
+  const requestBody = {
+    model: model || 'google/gemini-2.0-flash-exp:free',
+    messages: [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: prompt }
+    ],
+    tools: tools,
+    tool_choice: 'auto',
+    max_tokens: 4000,
+    temperature: 0.7
+  };
+
+  console.log('[ai] OpenRouter request body:', JSON.stringify(requestBody, null, 2));
+
+  const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${openrouterKey}`,
+      'Content-Type': 'application/json',
+      'HTTP-Referer': 'http://localhost:8787',
+      'X-Title': 'Elideable'
+    },
+    body: JSON.stringify(requestBody)
+  });
+
+  console.log('[ai] OpenRouter response status:', response.status);
+  console.log('[ai] OpenRouter response headers:', Object.fromEntries(response.headers.entries()));
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    console.error(`[ai] OpenRouter API error ${response.status}:`, errorText);
+    throw new Error(`OpenRouter API error: ${response.status} - ${errorText}`);
+  }
+
+  const data = await response.json();
+  console.log('[ai] OpenRouter tool-calling response received');
+
+  if (!data.choices || !data.choices[0] || !data.choices[0].message) {
+    console.error('[ai] Invalid OpenRouter response structure:', data);
+    throw new Error('Invalid OpenRouter response structure');
+  }
+
+  const message = data.choices[0].message;
+  const summaryParts = [];
+  const diffs = [];
+
+  // Handle tool calls (OpenAI format)
+  if (message.tool_calls && message.tool_calls.length > 0) {
+    for (const toolCall of message.tool_calls) {
+      if (toolCall.function.name === 'write_files') {
+        try {
+          const args = JSON.parse(toolCall.function.arguments);
+          const files = args.files || [];
+          console.log(`[ai] OpenRouter tool call: write_files with ${files.length} files`);
+
+          for (const file of files) {
+            diffs.push({ name: file.path, content: file.content || '' });
+          }
+          summaryParts.push(`Generated ${files.length} files: ${files.map(f => f.path).join(', ')}`);
+        } catch (e) {
+          console.error('[ai] Failed to parse OpenRouter tool call arguments:', e.message);
+        }
+      }
+    }
+  }
+
+  // If no tool calls, try to parse content as JSON (fallback)
+  if (diffs.length === 0 && message.content) {
+    try {
+      const parsed = JSON.parse(message.content);
+      if (parsed.files && Array.isArray(parsed.files)) {
+        for (const file of parsed.files) {
+          diffs.push({ name: file.name || file.path, content: file.content || '' });
+        }
+        summaryParts.push(`Parsed ${parsed.files.length} files from JSON response`);
+      }
+    } catch (e) {
+      console.log('[ai] OpenRouter response is not JSON, treating as text');
+      summaryParts.push('Generated text response (no files)');
+    }
+  }
+
+  const summary = summaryParts.join('\n\n');
+  return { plan: { message: summary || 'Generated plan with OpenRouter tools.', prompt }, diffs };
 }
 
 // --- Apply helpers ---

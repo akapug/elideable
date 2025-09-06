@@ -24,6 +24,7 @@
     "kill": "node -e \"require('child_process').exec(process.platform === 'win32' ? 'taskkill /f /im node.exe' : 'pkill -f elide.mjs && pkill -f vite', () => console.log('Services stopped'))\""
   },
   "devDependencies": {
+    "@playwright/test": "^1.55.0",
     "concurrently": "^9.1.0",
     "prettier": "^3.3.3"
   }
