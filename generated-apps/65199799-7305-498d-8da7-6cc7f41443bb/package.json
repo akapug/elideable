@@ -1,0 +1,34 @@
+{
+  "name": "elide-polyglot-hello-world",
+  "version": "1.0.0",
+  "description": "A Hello World app demonstrating Elide's polyglot capabilities",
+  "main": "app.js",
+  "scripts": {
+    "start": "elide serve .",
+    "dev": "elide dev .",
+    "build": "elide build .",
+    "test": "elide test"
+  },
+  "keywords": [
+    "elide",
+    "polyglot",
+    "javascript",
+    "python",
+    "kotlin",
+    "hello-world"
+  ],
+  "author": "Elide Developer",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^18.0.0"
+  },
+  "engines": {
+    "elide": ">=1.0.0"
+  },
+  "elide": {
+    "polyglot": {
+      "languages": ["javascript", "python", "kotlin"],
+      "entry": "index.html"
+    }
+  }
+}

@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Elide Polyglot Hello World</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            min-height: 100vh;
+        }
+        .container {
+            background: rgba(255, 255, 255, 0.1);
+            padding: 30px;
+            border-radius: 15px;
+            backdrop-filter: blur(10px);
+            box-shadow: 0 8px 32px 0 rgba(31, 38, 135, 0.37);
+        }
+        .language-demo {
+            margin: 20px 0;
+            padding: 15px;
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 8px;
+            border-left: 4px solid #4CAF50;
+        }
+        button {
+            background: #4CAF50;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 5px;
+            cursor: pointer;
+            margin: 5px;
+        }
+        button:hover {
+            background: #45a049;
+        }
+        pre {
+            background: rgba(0, 0, 0, 0.3);
+            padding: 10px;
+            border-radius: 5px;
+            overflow-x: auto;
+        }
+        .output {
+            background: rgba(0, 0, 0, 0.2);
+            padding: 10px;
+            border-radius: 5px;
+            margin-top: 10px;
+            min-height: 20px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🚀 Elide Polyglot Hello World</h1>
+        <p>This demo showcases Elide's ability to run multiple languages in a single application!</p>
+        
+        <div class="language-demo">
+            <h3>JavaScript/TypeScript</h3>
+            <button onclick="runJavaScript()">Run JavaScript Hello</button>
+            <div id="js-output" class="output"></div>
+        </div>
+        
+        <div class="language-demo">
+            <h3>Python</h3>
+            <button onclick="runPython()">Run Python Hello</button>
+            <div id="python-output" class="output"></div>
+        </div>
+        
+        <div class="language-demo">
+            <h3>Kotlin</h3>
+            <button onclick="runKotlin()">Run Kotlin Hello</button>
+            <div id="kotlin-output" class="output"></div>
+        </div>
+        
+        <div class="language-demo">
+            <h3>Polyglot Combination</h3>
+            <button onclick="runPolyglot()">Run All Languages</button>
+            <div id="polyglot-output" class="output"></div>
+        </div>
+    </div>
+    
+    <script src="app.js"></script>
+</body>
+</html>

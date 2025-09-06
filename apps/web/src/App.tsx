@@ -1,6 +1,115 @@
 import React, { useState, useEffect } from 'react';
 import './index.css';
 
+function CodeEditor({ currentAppId, fileTree }: { currentAppId: string | null, fileTree: Array<{type: 'file' | 'dir'; path: string}> }) {
+  const [selectedFile, setSelectedFile] = useState<string | null>(null);
+  const [fileContent, setFileContent] = useState<string>('');
+  const [loading, setLoading] = useState(false);
+
+  const loadFile = async (filePath: string) => {
+    if (!currentAppId) return;
+    setLoading(true);
+    try {
+      const resp = await fetch(`http://localhost:8787/api/files/content?appId=${currentAppId}&filePath=${encodeURIComponent(filePath)}`);
+      const content = await resp.text();
+      setFileContent(content);
+      setSelectedFile(filePath);
+    } catch (error) {
+      console.error('Failed to load file:', error);
+      setFileContent('// Failed to load file');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const saveFile = async () => {
+    if (!currentAppId || !selectedFile) return;
+    try {
+      await fetch(`http://localhost:8787/api/files/save`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ appId: currentAppId, filePath: selectedFile, content: fileContent })
+      });
+      alert('File saved successfully!');
+    } catch (error) {
+      console.error('Failed to save file:', error);
+      alert('Failed to save file');
+    }
+  };
+
+  if (!currentAppId) {
+    return (
+      <div className="h-full flex items-center justify-center text-slate-400">
+        No app selected. Generate an app first!
+      </div>
+    );
+  }
+
+  return (
+    <div className="h-full flex">
+      {/* File Tree */}
+      <div className="w-1/3 bg-slate-800 border-r border-slate-700 overflow-y-auto">
+        <div className="p-3 border-b border-slate-700">
+          <h3 className="text-sm font-medium text-slate-200">Files</h3>
+        </div>
+        <div className="p-2">
+          {fileTree.map((item, index) => (
+            <div key={index} className="mb-1">
+              {item.type === 'file' ? (
+                <button
+                  onClick={() => loadFile(item.path)}
+                  className={`w-full text-left px-2 py-1 text-sm rounded hover:bg-slate-700 ${
+                    selectedFile === item.path ? 'bg-slate-700 text-blue-400' : 'text-slate-300'
+                  }`}
+                >
+                  📄 {item.path.split('/').pop()}
+                </button>
+              ) : (
+                <div className="px-2 py-1 text-sm text-slate-400">
+                  📁 {item.path.split('/').pop()}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Code Editor */}
+      <div className="flex-1 flex flex-col">
+        {selectedFile && (
+          <div className="flex items-center justify-between p-3 bg-slate-800 border-b border-slate-700">
+            <span className="text-sm text-slate-200">{selectedFile}</span>
+            <button
+              onClick={saveFile}
+              className="px-3 py-1 bg-blue-600 hover:bg-blue-500 text-white text-sm rounded"
+            >
+              Save
+            </button>
+          </div>
+        )}
+        <div className="flex-1 p-4">
+          {loading ? (
+            <div className="flex items-center justify-center h-full text-slate-400">
+              Loading...
+            </div>
+          ) : selectedFile ? (
+            <textarea
+              value={fileContent}
+              onChange={(e) => setFileContent(e.target.value)}
+              className="w-full h-full bg-slate-900 text-slate-200 font-mono text-sm p-4 border border-slate-700 rounded resize-none focus:outline-none focus:ring-2 focus:ring-blue-500"
+              placeholder="File content will appear here..."
+            />
+          ) : (
+            <div className="flex items-center justify-center h-full text-slate-400">
+              Select a file to edit
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function GeneratedPreview({ previewUrl }: { previewUrl?: string }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -143,6 +252,7 @@ export default function App() {
   const [selectedModel, setSelectedModel] = useState('claude-sonnet-4-20250514');
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [currentAppId, setCurrentAppId] = useState<string | null>(null);
+  const [viewMode, setViewMode] = useState<'preview' | 'code'>('preview');
 
   const models = [
     // OpenRouter Free Models
@@ -500,10 +610,40 @@ export default function App() {
           </Pane>
         </div>
         <div className="col-span-6">
-          <Pane title="Live Preview">
+          <Pane title={
+            <div className="flex items-center justify-between w-full">
+              <span>{viewMode === 'preview' ? 'Live Preview' : 'Code Editor'}</span>
+              <div className="flex bg-slate-700 rounded-lg p-1">
+                <button
+                  onClick={() => setViewMode('preview')}
+                  className={`px-3 py-1 text-xs rounded-md transition-colors ${
+                    viewMode === 'preview'
+                      ? 'bg-blue-600 text-white'
+                      : 'text-slate-300 hover:text-white'
+                  }`}
+                >
+                  Preview
+                </button>
+                <button
+                  onClick={() => setViewMode('code')}
+                  className={`px-3 py-1 text-xs rounded-md transition-colors ${
+                    viewMode === 'code'
+                      ? 'bg-blue-600 text-white'
+                      : 'text-slate-300 hover:text-white'
+                  }`}
+                >
+                  Code
+                </button>
+              </div>
+            </div>
+          }>
             <div className="p-4 h-full">
               <div className="w-full h-full bg-slate-800/50 rounded-xl border border-slate-700/50 text-slate-200">
-                <GeneratedPreview previewUrl={previewUrl || undefined} />
+                {viewMode === 'preview' ? (
+                  <GeneratedPreview previewUrl={previewUrl || undefined} />
+                ) : (
+                  <CodeEditor currentAppId={currentAppId} fileTree={fileTree} />
+                )}
               </div>
             </div>
           </Pane>

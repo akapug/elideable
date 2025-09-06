@@ -145,6 +145,66 @@ const server = http.createServer(async (req, res) => {
     res.end(JSON.stringify({ path: p, content }));
     return;
   }
+  if (url.pathname === '/api/files/content' && req.method === 'GET') {
+    const appId = url.searchParams.get('appId');
+    const filePath = url.searchParams.get('filePath');
+    if (!appId || !filePath) {
+      res.writeHead(400, { 'Content-Type': 'text/plain' });
+      res.end('Missing appId or filePath');
+      return;
+    }
+    try {
+      const appDir = path.join(GENERATED_APPS_DIR, appId);
+      const fullPath = path.join(appDir, filePath);
+      const content = await fs.readFile(fullPath, 'utf8');
+      res.writeHead(200, { 'Content-Type': 'text/plain' });
+      res.end(content);
+    } catch (error) {
+      res.writeHead(404, { 'Content-Type': 'text/plain' });
+      res.end('File not found');
+    }
+    return;
+  }
+  if (url.pathname === '/api/files/save' && req.method === 'POST') {
+    const body = await readJSON(req, res);
+    const { appId, filePath, content } = body || {};
+    if (!appId || !filePath || content === undefined) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Missing appId, filePath, or content' }));
+      return;
+    }
+    try {
+      const appDir = path.join(GENERATED_APPS_DIR, appId);
+      const fullPath = path.join(appDir, filePath);
+      await fs.writeFile(fullPath, content, 'utf8');
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: true }));
+    } catch (error) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Failed to save file' }));
+    }
+    return;
+  }
+  if (url.pathname === '/api/files/open' && req.method === 'POST') {
+    const body = await readJSON(req, res);
+    const { appId, filePath } = body || {};
+    if (!appId || !filePath) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Missing appId or filePath' }));
+      return;
+    }
+    try {
+      const appDir = path.join(GENERATED_APPS_DIR, appId);
+      const fullPath = path.join(appDir, filePath);
+      // For now, just return success - in a real implementation, this would open the file in the system editor
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: true, message: 'File opened' }));
+    } catch (error) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Failed to open file' }));
+    }
+    return;
+  }
   if (url.pathname === '/api/ai/summarize' && req.method === 'POST') {
     const body = await readJSON(req, res);
     const text = String(body?.text || '');
