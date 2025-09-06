@@ -596,44 +596,27 @@ async function planWithAnthropicTools({ prompt, systemPrompt, anthropic, appId }
       const input = block.input || {};
       if (block.name === 'write_files') {
         let files = input.files || [];
-        console.log('[ai] Raw files input type:', typeof files);
-        console.log('[ai] Raw files input length:', typeof files === 'string' ? files.length : files.length);
+        console.log('[ai] Processing write_files tool call, files type:', typeof files);
 
         // Handle case where files is a JSON string instead of array
         if (typeof files === 'string') {
-          console.log('[ai] Files is string, first 200 chars:', files.substring(0, 200));
-          console.log('[ai] Files is string, last 200 chars:', files.substring(files.length - 200));
           try {
             files = JSON.parse(files);
             console.log('[ai] Successfully parsed files JSON, got', files.length, 'files');
           } catch (e) {
             console.error('[ai] Failed to parse files JSON string:', e.message);
-            console.error('[ai] JSON error at position:', e.message.match(/position (\d+)/)?.[1]);
-
-            // Try to fix common JSON issues
-            let fixedJson = files;
-
-            // Fix escaped quotes that might be breaking the JSON
-            fixedJson = fixedJson.replace(/\\"/g, '"');
-
-            // Try to find and fix the specific error location
-            if (e.message.includes('position')) {
-              const pos = parseInt(e.message.match(/position (\d+)/)?.[1] || '0');
-              console.log('[ai] Context around error position:', files.substring(Math.max(0, pos - 50), pos + 50));
-            }
-
-            try {
-              files = JSON.parse(fixedJson);
-              console.log('[ai] Successfully parsed fixed JSON, got', files.length, 'files');
-            } catch (e2) {
-              console.error('[ai] Still failed after fixing, giving up:', e2.message);
-              files = [];
-            }
+            console.error('[ai] Raw files string length:', files.length);
+            files = [];
           }
         }
 
-        console.log('[ai] Final files array length:', files.length);
-        for (const f of files) diffs.push({ name: f.path || f.name, content: f.content ?? '' });
+        console.log('[ai] Processing', files.length, 'files');
+        for (const f of files) {
+          const fileName = f.path || f.name;
+          const fileContent = f.content ?? '';
+          console.log('[ai] Adding file:', fileName, '(', fileContent.length, 'chars)');
+          diffs.push({ name: fileName, content: fileContent });
+        }
       }
       if (block.name === 'read_file') {
         const content = await readFileForApp(input.path);
