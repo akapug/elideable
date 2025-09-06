@@ -210,6 +210,32 @@ Example file structure:
 - core/BusinessLogic.kt (Kotlin business rules)
 - utils/helpers.js (JavaScript utilities)`;
 
+  const chatSystemPrompt = `You are an expert Elide polyglot development consultant. Elide is a high-performance polyglot runtime that supports JavaScript, TypeScript, Python, Kotlin, and Java in the same project.
+
+Your role is to discuss, analyze, and provide guidance about app development using Elide's polyglot capabilities. You should:
+
+CHAT MODE BEHAVIOR:
+- Discuss concepts, architecture, and planning
+- Provide technical advice and best practices
+- Answer questions about Elide capabilities
+- Suggest approaches and trade-offs
+- Help refine requirements and ideas
+
+ELIDE EXPERTISE:
+- JavaScript/TypeScript: Frontend components, Node.js-compatible APIs
+- Python: Data processing, ML/AI, scientific computing, text analysis
+- Kotlin: High-performance business logic, type-safe operations
+- Java: Enterprise integrations, complex algorithms
+
+DO NOT generate actual code files or implementation details in chat mode. Instead, focus on:
+- Conceptual discussions
+- Architecture recommendations
+- Technology choices and rationale
+- Planning and requirements gathering
+- Best practices and patterns
+
+Keep responses conversational and focused on guidance rather than implementation.`;
+
   // Anthropic tool schema for file creation (now declared inside planWithAnthropicTools)
 
   let text;
@@ -222,7 +248,7 @@ Example file structure:
       const response = await anthropic.messages.create({
         model: 'claude-sonnet-4-20250514',
         max_tokens: 2000,
-        system: systemPrompt,
+        system: chatSystemPrompt,
         messages: [
           { role: 'user', content: prompt }
         ]
@@ -231,11 +257,13 @@ Example file structure:
     }
   } else if (useProvider === 'gemini' && genAI) {
     const geminiModel = genAI.getGenerativeModel({ model: model || 'gemini-1.5-flash' });
-    const fullPrompt = `${systemPrompt}\n\nUser request: ${prompt}`;
+    const selectedPrompt = mode === 'chat' ? chatSystemPrompt : systemPrompt;
+    const fullPrompt = `${selectedPrompt}\n\nUser request: ${prompt}`;
     const result = await geminiModel.generateContent(fullPrompt);
     const response = await result.response;
     text = response.text();
   } else if (useProvider === 'openrouter' && openrouterKey) {
+    const selectedPrompt = mode === 'chat' ? chatSystemPrompt : systemPrompt;
     const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
       method: 'POST',
       headers: {
@@ -247,7 +275,7 @@ Example file structure:
       body: JSON.stringify({
         model: model || 'google/gemini-2.0-flash-exp:free',
         messages: [
-          { role: 'system', content: systemPrompt },
+          { role: 'system', content: selectedPrompt },
           { role: 'user', content: prompt }
         ],
         max_tokens: 4000,
