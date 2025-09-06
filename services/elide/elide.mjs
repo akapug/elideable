@@ -9,7 +9,7 @@ import crypto from 'node:crypto';
 const ROOT = process.cwd();
 const GENERATED_APPS_DIR = path.join(ROOT, 'generated-apps');
 
-const PORT = Number(process.env.PORT_ELIDE || 8788);
+const PORT = Number(process.env.PORT_ELIDE || 8787);
 const PROVIDER = process.env.ELV_PROVIDER || 'openrouter';
 
 // Track running Elide processes
@@ -447,13 +447,28 @@ async function planWithAnthropicTools({ prompt, systemPrompt, anthropic, appId }
       if (chunk.delta.type === 'text_delta') {
         response.content[chunk.index].text = (response.content[chunk.index].text || '') + chunk.delta.text;
       } else if (chunk.delta.type === 'input_json_delta') {
-        response.content[chunk.index].input = (response.content[chunk.index].input || '') + chunk.delta.partial_json;
+        // Accumulate JSON string, then parse it at the end
+        response.content[chunk.index].input_json_string = (response.content[chunk.index].input_json_string || '') + chunk.delta.partial_json;
       }
     } else if (chunk.type === 'content_block_start') {
       response.content[chunk.index] = chunk.content_block;
     } else if (chunk.type === 'message_delta') {
       response.stop_reason = chunk.delta.stop_reason;
       response.usage = chunk.usage;
+    }
+  }
+
+  // Parse accumulated JSON strings for tool inputs
+  for (const block of response.content) {
+    if (block.type === 'tool_use' && block.input_json_string) {
+      try {
+        block.input = JSON.parse(block.input_json_string);
+        delete block.input_json_string; // Clean up
+      } catch (e) {
+        console.error('[ai] Failed to parse tool input JSON:', e.message);
+        console.error('[ai] Raw JSON string:', block.input_json_string);
+        block.input = {}; // Fallback to empty object
+      }
     }
   }
 
@@ -472,7 +487,16 @@ async function planWithAnthropicTools({ prompt, systemPrompt, anthropic, appId }
     if (block.type === 'tool_use') {
       const input = block.input || {};
       if (block.name === 'write_files') {
-        const files = input.files || [];
+        let files = input.files || [];
+        // Handle case where files is a JSON string instead of array
+        if (typeof files === 'string') {
+          try {
+            files = JSON.parse(files);
+          } catch (e) {
+            console.error('[ai] Failed to parse files JSON string:', e.message);
+            files = [];
+          }
+        }
         for (const f of files) diffs.push({ name: f.path || f.name, content: f.content ?? '' });
       }
       if (block.name === 'read_file') {

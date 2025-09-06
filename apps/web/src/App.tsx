@@ -160,8 +160,8 @@ export default function App() {
   async function refreshTree() {
     try {
       const url = currentAppId
-        ? `http://localhost:8788/api/files/tree?appId=${currentAppId}`
-        : 'http://localhost:8788/api/files/tree';
+        ? `http://localhost:8787/api/files/tree?appId=${currentAppId}`
+        : 'http://localhost:8787/api/files/tree';
       const resp = await fetch(url);
       const json = await resp.json();
       setFileTree(json.tree || []);
@@ -173,7 +173,7 @@ export default function App() {
 
     try {
       // Request the backend to open the file in the system editor
-      await fetch(`http://localhost:8788/api/files/open`, {
+      await fetch(`http://localhost:8787/api/files/open`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ appId: currentAppId, filePath }),
@@ -182,7 +182,7 @@ export default function App() {
       console.error('Failed to open file:', error);
       // Fallback: try to fetch and display the file content
       try {
-        const resp = await fetch(`http://localhost:8788/api/files/content?appId=${currentAppId}&filePath=${encodeURIComponent(filePath)}`);
+        const resp = await fetch(`http://localhost:8787/api/files/content?appId=${currentAppId}&filePath=${encodeURIComponent(filePath)}`);
         const content = await resp.text();
 
         // Create a new window with the file content
@@ -258,7 +258,7 @@ export default function App() {
 
     try {
       // Step 1: Generate the plan
-      const resp = await fetch('http://localhost:8788/api/ai/plan', {
+      const resp = await fetch('http://localhost:8787/api/ai/plan', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ prompt: userMessage.content, model: selectedModel, mode, appId: currentAppId || undefined }),
@@ -310,7 +310,7 @@ export default function App() {
         setMessages(prev => [...prev, creatingMessage]);
 
         try {
-          const applyResp = await fetch('http://localhost:8788/api/ai/apply', {
+          const applyResp = await fetch('http://localhost:8787/api/ai/apply', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
