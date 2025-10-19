@@ -224,6 +224,11 @@ const server = http.createServer(async (req, res) => {
 
 async function generatePlan(prompt, model = null, options = {}) {
   const mode = options?.mode || 'edit'; // 'chat' disables tool-calling and file extraction
+  // Local provider via Elide runtime + Ollama
+  if (PROVIDER === 'local' || (model && model.toLowerCase().includes('gemma'))) {
+    console.log('[ai] Using local provider (Ollama: Gemma)');
+    return await planWithLocalOllamaNode(prompt, model, options);
+  }
   if (!genAI && !anthropic && !openrouterKey) {
     // Providerless fallback: synthesize minimal files based on prompt
     return fallbackGeneratePlan(prompt);
@@ -239,6 +244,8 @@ async function generatePlan(prompt, model = null, options = {}) {
     } else if (model.includes('/') || model.includes(':free')) {
       useProvider = 'openrouter';
     }
+
+
   }
 
   const systemPrompt = `You are an expert Elide polyglot app builder. Elide is a high-performance polyglot runtime that supports JavaScript, TypeScript, Python, Kotlin, and Java in the same project.
@@ -322,6 +329,8 @@ Keep responses conversational and focused on guidance rather than implementation
     const result = await geminiModel.generateContent(fullPrompt);
     const response = await result.response;
     text = response.text();
+  } else if (useProvider === 'local') {
+    return await planWithLocalOllamaNode(prompt, model, options);
   } else if (useProvider === 'openrouter' && openrouterKey) {
     if (mode !== 'chat') {
       // Use OpenRouter with tool-calling (OpenAI format)
@@ -543,6 +552,93 @@ async function planWithAnthropicTools({ prompt, systemPrompt, anthropic, appId }
   });
 
   // Collect the streaming response
+
+// Local provider via Elide runtime (spawns Elide to run TS that calls Ollama)
+async function planWithLocalElide(prompt, model = null, options = {}) {
+  return new Promise((resolve) => {
+    try {
+      const scriptPath = path.join(ROOT, 'services', 'elide', 'local_infer.js');
+      const payload = {
+        prompt,
+        model: model || process.env.OLLAMA_MODEL || 'gemma2:2b-instruct',
+        options,
+        ollama: {
+          baseUrl: process.env.OLLAMA_BASE_URL || 'http://127.0.0.1:11434',
+          model: process.env.OLLAMA_MODEL || 'gemma2:2b-instruct'
+        }
+      };
+      const proc = spawn('elide', ['js', scriptPath, '--', JSON.stringify(payload)]);
+      let out = '';
+      let err = '';
+      proc.stdout.on('data', (d) => out += d);
+      proc.stderr.on('data', (d) => err += d);
+      proc.on('exit', (code) => {
+        if (code === 0) {
+          try { resolve(JSON.parse(out || '{}')); }
+          catch (e) { console.error('[ai] local elide parse error:', e); resolve(fallbackGeneratePlan(prompt)); }
+        } else {
+          console.error('[ai] local elide exited', code, err);
+          resolve(fallbackGeneratePlan(prompt));
+        }
+      });
+    } catch (e) {
+      console.error('[ai] local elide spawn error:', e);
+      resolve(fallbackGeneratePlan(prompt));
+    }
+  });
+}
+
+
+// Local provider via direct Node fetch to Ollama (robust fallback while Elide run is flaky)
+async function planWithLocalOllamaNode(prompt, model = null, options = {}) {
+  const baseUrl = process.env.OLLAMA_BASE_URL || 'http://127.0.0.1:11434';
+  const mdl = (process.env.OLLAMA_MODEL && process.env.OLLAMA_MODEL.trim()) ? process.env.OLLAMA_MODEL : (model || 'gemma2:2b-instruct-q8_0');
+  const system = [
+    'You are Elideable Plan Writer. Return ONLY strict JSON matching this schema:',
+    '{\n  "plan": { "message": string, "prompt": string },\n  "diffs": [ { "name": string, "content": string } ]\n}',
+    'ALWAYS include at least one file in diffs. Prefer a single index.html for tiny demos.',
+    'Do not include markdown fences. Do not include explanations.'
+  ].join('\n');
+  const body = {
+    model: mdl,
+    stream: false,
+    format: 'json',
+    options: { temperature: 0.3 },
+    messages: [ { role: 'system', content: system }, { role: 'user', content: String(prompt || '') } ]
+  };
+  try {
+    const res = await fetch(`${baseUrl}/api/chat`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    if (!res.ok) throw new Error(`Ollama HTTP ${res.status}`);
+    const data = await res.json();
+    const content = data?.message?.content || '';
+    let parsed = null;
+    try { parsed = JSON.parse(String(content).trim()); } catch {}
+
+    // Tolerant fallback: if not strict JSON, accept raw HTML or heuristically mirror the prompt
+    if (!parsed || !Array.isArray(parsed.diffs) || parsed.diffs.length === 0) {
+      // Try to extract full HTML from the model output
+      const htmlMatch = String(content).match(/<html[\s\S]*<\/html>/i) || String(content).match(/<!doctype html[\s\S]*<\/html>/i);
+      if (htmlMatch) {
+        parsed = { plan: { message: 'Generated HTML from model output.', prompt }, diffs: [ { name: 'index.html', content: htmlMatch[0] } ] };
+      } else {
+        // Heuristic: allow `h1: ...` hint in prompt to define the heading
+        const h1Match = String(prompt || '').match(/h1:\s*([^\n]+)/i);
+        const h1 = (h1Match && h1Match[1] && h1Match[1].trim()) ? h1Match[1].trim() : 'Hello from Gemma!';
+        parsed = {
+          plan: { message: 'Heuristic fallback from prompt.', prompt },
+          diffs: [ { name: 'index.html', content: `<!doctype html><html><head><meta charset="utf-8"/><title>Hello</title></head><body><h1>${h1}</h1></body></html>` } ]
+        };
+      }
+    } else {
+      parsed.plan = parsed.plan || { message: 'Generated plan', prompt };
+    }
+    return parsed;
+  } catch (e) {
+    console.warn('[ai] local ollama error:', e?.message || e);
+    return fallbackGeneratePlan(prompt);
+  }
+}
+
   let response = { content: [], stop_reason: null, usage: null };
   for await (const chunk of stream) {
     if (chunk.type === 'content_block_delta') {
@@ -667,6 +763,92 @@ async function planWithAnthropicTools({ prompt, systemPrompt, anthropic, appId }
   const summary = summaryParts.join('\n\n');
   return { plan: { message: summary || 'Generated plan with proposed files/edits.', prompt }, diffs };
 }
+
+// Local provider via Elide runtime (spawns Elide to run TS that calls Ollama)
+async function planWithLocalElide(prompt, model = null, options = {}) {
+  return new Promise((resolve) => {
+    try {
+      const scriptPath = path.join(ROOT, 'services', 'elide', 'local_infer.js');
+      const payload = {
+        prompt,
+        model: model || process.env.OLLAMA_MODEL || 'gemma2:2b-instruct',
+        options,
+        ollama: {
+          baseUrl: process.env.OLLAMA_BASE_URL || 'http://127.0.0.1:11434',
+          model: process.env.OLLAMA_MODEL || 'gemma2:2b-instruct'
+        }
+      };
+      const proc = spawn('elide', ['js', scriptPath, '--', JSON.stringify(payload)]);
+      let out = '';
+      let err = '';
+      proc.stdout.on('data', (d) => out += d);
+      proc.stderr.on('data', (d) => err += d);
+      proc.on('exit', (code) => {
+        if (code === 0) {
+          try { resolve(JSON.parse(out || '{}')); }
+          catch (e) { console.error('[ai] local elide parse error:', e); resolve(fallbackGeneratePlan(prompt)); }
+        } else {
+          console.error('[ai] local elide exited', code, err);
+          resolve(fallbackGeneratePlan(prompt));
+        }
+      });
+    } catch (e) {
+      console.error('[ai] local elide spawn error:', e);
+      resolve(fallbackGeneratePlan(prompt));
+    }
+  });
+}
+
+// Local provider via direct Node fetch to Ollama (robust fallback while Elide run is flaky)
+async function planWithLocalOllamaNode(prompt, model = null, options = {}) {
+  const baseUrl = process.env.OLLAMA_BASE_URL || 'http://127.0.0.1:11434';
+  const mdl = (process.env.OLLAMA_MODEL && process.env.OLLAMA_MODEL.trim()) ? process.env.OLLAMA_MODEL : (model || 'gemma2:2b-instruct-q8_0');
+  const system = [
+    'You are Elideable Plan Writer. Return ONLY strict JSON matching this schema:',
+    '{\n  "plan": { "message": string, "prompt": string },\n  "diffs": [ { "name": string, "content": string } ]\n}',
+    'ALWAYS include at least one file in diffs. Prefer a single index.html for tiny demos.',
+    'Do not include markdown fences. Do not include explanations.'
+  ].join('\n');
+  const body = {
+    model: mdl,
+    stream: false,
+    format: 'json',
+    options: { temperature: 0.3 },
+    messages: [ { role: 'system', content: system }, { role: 'user', content: String(prompt || '') } ]
+  };
+  try {
+    const res = await fetch(`${baseUrl}/api/chat`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    if (!res.ok) throw new Error(`Ollama HTTP ${res.status}`);
+    const data = await res.json();
+    const content = data?.message?.content || '';
+    let parsed = null;
+    try { parsed = JSON.parse(String(content).trim()); } catch {}
+
+    // Tolerant fallback: if not strict JSON, accept raw HTML or heuristically mirror the prompt
+    if (!parsed || !Array.isArray(parsed.diffs) || parsed.diffs.length === 0) {
+      // Try to extract full HTML from the model output
+      const htmlMatch = String(content).match(/<html[\s\S]*<\/html>/i) || String(content).match(/<!doctype html[\s\S]*<\/html>/i);
+      if (htmlMatch) {
+        parsed = { plan: { message: 'Generated HTML from model output.', prompt }, diffs: [ { name: 'index.html', content: htmlMatch[0] } ] };
+      } else {
+        // Heuristic: allow `h1: ...` hint in prompt to define the heading
+        const h1Match = String(prompt || '').match(/h1:\s*([^\n]+)/i);
+        const h1 = (h1Match && h1Match[1] && h1Match[1].trim()) ? h1Match[1].trim() : 'Hello from Gemma!';
+        parsed = {
+          plan: { message: 'Heuristic fallback from prompt.', prompt },
+          diffs: [ { name: 'index.html', content: `<!doctype html><html><head><meta charset=\"utf-8\"/><title>Hello</title></head><body><h1>${h1}</h1></body></html>` } ]
+        };
+      }
+    } else {
+      parsed.plan = parsed.plan || { message: 'Generated plan', prompt };
+    }
+    return parsed;
+  } catch (e) {
+    console.warn('[ai] local ollama error:', e?.message || e);
+    return fallbackGeneratePlan(prompt);
+  }
+}
+
 
 // --- Tool Planning Helpers (OpenRouter) ---
 async function planWithOpenRouterTools({ prompt, systemPrompt, openrouterKey, model, appId }) {
@@ -1239,7 +1421,20 @@ function setupProcessHandlers(process, appId, port, resolve, reject) {
   });
 
   process.stderr.on('data', (data) => {
-    console.error(`[elide:${appId}] ERROR: ${data.toString().trim()}`);
+    const output = data.toString();
+    console.error(`[elide:${appId}] ERROR: ${output.trim()}`);
+
+    // Some CLIs log startup info to stderr; mirror start detection here
+    if (output.includes('Serving') || output.includes('Server started') || output.includes(`port ${port}`) || output.includes('listening')) {
+      if (!started) {
+        started = true;
+        clearTimeout(timeout);
+        const url = `http://localhost:${port}`;
+        runningApps.set(appId, { process, port, url });
+        console.log(`[elide] App ${appId} started at ${url}`);
+        resolve({ port, url });
+      }
+    }
   });
 
   process.on('exit', (code) => {
