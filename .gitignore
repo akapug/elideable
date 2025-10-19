@@ -29,3 +29,11 @@ Thumbs.db
 
 # Generated workspace
 apps/web/.elovable/
+
+
+# E2E and generated app artifacts
+generated-apps/
+test-results/
+playwright-report/
+.playwright/
+coverage/

@@ -49,7 +49,7 @@ const server = http.createServer(async (req, res) => {
   }
   if (url.pathname === '/health') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ ok: true, provider: PROVIDER }));
+    res.end(JSON.stringify({ ok: true, provider: PROVIDER, local: PROVIDER === 'local', model: process.env.OLLAMA_MODEL || null }));
     return;
   }
   if (url.pathname === '/api/ai/plan' && req.method === 'POST') {
@@ -1470,14 +1470,14 @@ function getAppUrl(appId) {
 async function readAppTree(appId) {
   const appDir = path.join(GENERATED_APPS_DIR, appId);
   try {
-    return await readTreeFromDir(appDir);
+    return await readTreeFromDir(appDir, appDir);
   } catch (error) {
     console.error(`[elide] Failed to read app tree for ${appId}:`, error);
     return [];
   }
 }
 
-async function readTreeFromDir(dir) {
+async function readTreeFromDir(dir, baseDir = path.join(GENERATED_APPS_DIR)) {
   const tree = [];
   try {
     const entries = await fs.readdir(dir, { withFileTypes: true });
@@ -1485,13 +1485,13 @@ async function readTreeFromDir(dir) {
       if (entry.name.startsWith('.')) continue; // Skip hidden files
 
       const fullPath = path.join(dir, entry.name);
-      const relativePath = path.relative(path.join(GENERATED_APPS_DIR), fullPath);
+      const relativePath = path.relative(baseDir, fullPath);
 
       if (entry.isDirectory()) {
         tree.push({
           path: relativePath,
           type: 'dir',
-          children: await readTreeFromDir(fullPath)
+          children: await readTreeFromDir(fullPath, baseDir)
         });
       } else {
         tree.push({

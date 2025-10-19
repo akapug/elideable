@@ -162,12 +162,14 @@ function GeneratedPreview({ previewUrl }: { previewUrl?: string }) {
         🔗 Open in New Tab
       </button>
 
-      <iframe
-        src={previewUrl}
-        className="w-full h-full border-0 rounded-lg"
-        title="Generated Elide App Preview"
-        onError={() => setError('Failed to load preview')}
-      />
+      <div className="w-full h-full bg-white text-black rounded-lg shadow-inner">
+        <iframe
+          src={previewUrl}
+          className="w-full h-full border-0 rounded-lg bg-white"
+          title="Generated Elide App Preview"
+          onError={() => setError('Failed to load preview')}
+        />
+      </div>
       {error && (
         <div className="absolute inset-0 flex items-center justify-center bg-slate-900/80 text-red-400">
           {error}
@@ -253,8 +255,10 @@ export default function App() {
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [currentAppId, setCurrentAppId] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<'preview' | 'code'>('preview');
+  const [backendInfo, setBackendInfo] = useState<{provider: string; local: boolean; model?: string} | null>(null);
 
   const models = [
+    // A synthetic local entry will be shown when backendInfo.local is true
     // OpenRouter Free Models
     { id: 'google/gemini-2.0-flash-exp:free', name: 'Gemini 2.0 Flash (Free)', provider: 'OpenRouter' },
     { id: 'deepseek/deepseek-v3:free', name: 'DeepSeek V3 (Free)', provider: 'OpenRouter' },
@@ -320,6 +324,15 @@ export default function App() {
     refreshTree();
     // Check for speech recognition support
     setSpeechSupported('webkitSpeechRecognition' in window || 'SpeechRecognition' in window);
+
+    // Fetch backend health to determine provider/model
+    fetch('http://localhost:8787/health').then(r => r.json()).then(info => {
+      setBackendInfo(info);
+      if (info?.local) {
+        const id = `ollama:${info.model || 'gemma2:2b-instruct-q8_0'}`;
+        setSelectedModel(id);
+      }
+    }).catch(() => {});
   }, []);
 
   function startListening() {
@@ -358,6 +371,13 @@ export default function App() {
       abortController.abort();
     }
   }
+
+  // Poll for live file tree updates while an app is active
+  useEffect(() => {
+    if (!currentAppId) return;
+    const id = setInterval(() => { refreshTree(); }, 3000);
+    return () => clearInterval(id);
+  }, [currentAppId]);
 
   async function sendMessage(mode: 'chat' | 'edit' = 'edit') {
     if (!input.trim() || busy) return;
@@ -545,12 +565,22 @@ export default function App() {
                     className="w-full px-3 py-2 bg-slate-800/80 border border-slate-700/50 rounded-lg text-sm text-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-500/50"
                     disabled={busy}
                   >
+                    {backendInfo?.local && (
+                      <option key="__local__" value={`ollama:${backendInfo.model || 'gemma2:2b-instruct-q8_0'}`}>
+                        Local (Ollama): {backendInfo.model || 'gemma2:2b-instruct-q8_0'}
+                      </option>
+                    )}
                     {models.map(model => (
-                      <option key={model.id} value={model.id}>
-                        {model.name} ({model.provider})
+                      <option key={model.id} value={model.id} disabled={!!backendInfo?.local}>
+                        {model.name} ({model.provider}) {backendInfo?.local ? '— disabled (offline mode)' : ''}
                       </option>
                     ))}
                   </select>
+                  {backendInfo?.local && (
+                    <div className="mt-1 text-xs text-slate-400">
+                      Offline mode: using local model via Ollama. Remote models are disabled.
+                    </div>
+                  )}
                 </div>
                 <div className="flex flex-wrap items-center gap-2">
                   <input
