@@ -1,9 +1,21 @@
 import React, { useState, useEffect } from 'react';
 import './index.css';
 
-function CodeEditor({ currentAppId, fileTree }: { currentAppId: string | null, fileTree: Array<{type: 'file' | 'dir'; path: string}> }) {
-  const [selectedFile, setSelectedFile] = useState<string | null>(null);
-  const [fileContent, setFileContent] = useState<string>('');
+function CodeEditor({
+  currentAppId,
+  fileTree,
+  selectedFile,
+  setSelectedFile,
+  fileContent,
+  setFileContent
+}: {
+  currentAppId: string | null,
+  fileTree: Array<{type: 'file' | 'dir'; path: string}>,
+  selectedFile: string | null,
+  setSelectedFile: (file: string | null) => void,
+  fileContent: string,
+  setFileContent: (content: string) => void
+}) {
   const [loading, setLoading] = useState(false);
 
   const getFileIcon = (filename: string) => {
@@ -391,6 +403,10 @@ export default function App() {
   const [showApps, setShowApps] = useState(false);
   const [appsList, setAppsList] = useState<Array<{appId: string; name: string; updatedAt: number}>>([]);
 
+  // Code editor state (for code streaming)
+  const [selectedFile, setSelectedFile] = useState<string | null>(null);
+  const [fileContent, setFileContent] = useState<string>('');
+
   async function fetchAppsList() {
     try {
       const r = await fetch('http://localhost:8787/api/apps');
@@ -639,8 +655,8 @@ export default function App() {
         content: msg.content
       }));
 
-      // Check if using local Ollama model for streaming
-      const useStreaming = selectedModel.startsWith('ollama:');
+      // Enable streaming for ALL models (both local and remote)
+      const useStreaming = true;
 
       if (useStreaming) {
         // Streaming mode for local models
@@ -1020,7 +1036,10 @@ export default function App() {
               <CodeEditor
                 fileTree={fileTree}
                 currentAppId={currentAppId}
-                onRefreshTree={refreshTree}
+                selectedFile={selectedFile}
+                setSelectedFile={setSelectedFile}
+                fileContent={fileContent}
+                setFileContent={setFileContent}
               />
             )}
           </Pane>
