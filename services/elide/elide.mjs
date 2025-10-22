@@ -55,7 +55,7 @@ const server = http.createServer(async (req, res) => {
   }
   if (url.pathname === '/api/ai/plan' && req.method === 'POST') {
     const body = await readJSON(req, res);
-    console.log('[ai] Planning request:', body?.prompt, 'with model:', body?.model, 'mode:', body?.mode || 'edit');
+    console.log('[ai] Planning request:', body?.prompt, 'with model:', body?.model, 'mode:', body?.mode || 'edit', 'appId:', body?.appId || '(new app)');
     try {
       const result = await generatePlan(body?.prompt || 'Create a simple app', body?.model, { mode: body?.mode || 'edit', appId: body?.appId || null });
       console.log('[ai] Generated plan:', JSON.stringify(result, null, 2));
@@ -74,6 +74,7 @@ const server = http.createServer(async (req, res) => {
 
     // Reuse existing app if provided, else create new
     const appId = incomingAppId || crypto.randomUUID();
+    console.log('[ai] Apply request: appId=', incomingAppId ? incomingAppId.slice(0,8) + ' (reuse)' : 'NEW', 'files=', files.length, 'edits=', edits.length);
 
     try {
       let appDir = path.join(GENERATED_APPS_DIR, appId);
