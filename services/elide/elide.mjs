@@ -318,7 +318,7 @@ ELIDE CAPABILITIES:
       return;
     }
     const appDir = path.join(GENERATED_APPS_DIR, appId);
-    try { await fs.promises.access(appDir); } catch { res.writeHead(404, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'App not found' })); return; }
+    try { await fs.access(appDir); } catch { res.writeHead(404, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'App not found' })); return; }
 
     // Deploy via a self-contained git repo in the app folder to avoid touching the main repo
     const script = [
@@ -353,7 +353,7 @@ ELIDE CAPABILITIES:
     const appId = url.searchParams.get('appId');
     if (!appId) { res.writeHead(400); res.end('Missing appId'); return; }
     const appDir = path.join(GENERATED_APPS_DIR, appId);
-    try { await fs.promises.access(appDir); } catch { res.writeHead(404); res.end('App not found'); return; }
+    try { await fs.access(appDir); } catch { res.writeHead(404); res.end('App not found'); return; }
 
     // Prefer "zip" CLI if available, otherwise fall back to tar.gz
     const checkZip = spawn('bash', ['-lc', 'command -v zip >/dev/null 2>&1; echo $?']);
