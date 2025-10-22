@@ -2,12 +2,15 @@ import http from 'node:http';
 import { spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import Anthropic from '@anthropic-ai/sdk';
 import crypto from 'node:crypto';
 
-// Go up two levels from services/elide to get to project root
-const ROOT = path.resolve(process.cwd(), '..', '..');
+// Resolve project root relative to this file location
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const ROOT = path.resolve(__dirname, '..', '..');
 const GENERATED_APPS_DIR = path.join(ROOT, 'generated-apps');
 
 const PORT = Number(process.env.PORT_ELIDE || 8787);
@@ -212,6 +215,139 @@ const server = http.createServer(async (req, res) => {
     }
     return;
   }
+  if (url.pathname === '/api/deploy/cloudflare-pages' && req.method === 'POST') {
+    const body = await readJSON(req, res);
+    const { appId, projectName } = body || {};
+    if (!appId || !projectName) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Missing appId or projectName' }));
+      return;
+    }
+    const appDir = path.join(GENERATED_APPS_DIR, appId);
+    try {
+      await fs.access(appDir);
+    } catch {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'App not found' }));
+      return;
+    }
+
+    try {
+      const args = ['-y', 'wrangler@latest', 'pages', 'deploy', appDir, `--project-name=${projectName}`];
+      console.log('[deploy] npx', args.join(' '));
+      const proc = spawn('npx', args, { cwd: ROOT, env: process.env });
+      let out = '';
+      let err = '';
+      proc.stdout.on('data', (d) => { out += d.toString(); process.stdout.write(`[deploy] ${d}`); });
+      proc.stderr.on('data', (d) => { err += d.toString(); process.stderr.write(`[deploy] ERR ${d}`); });
+      proc.on('close', (code) => {
+        if (code !== 0) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'wrangler failed', code, out, err }));
+          return;
+        }
+        const urlMatch = out.match(/https?:\/\/[^\s]+\.pages\.dev\S*/);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, url: urlMatch ? urlMatch[0] : null, out }));
+      });
+    } catch (e) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: e.message }));
+    }
+    return;
+  }
+
+  if (url.pathname === '/api/deploy/github-pages' && req.method === 'POST') {
+    const body = await readJSON(req, res);
+    const { appId, repoUrl, branch } = body || {};
+    const targetBranch = (branch && String(branch).trim()) || 'gh-pages';
+    if (!appId || !repoUrl) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Missing appId or repoUrl' }));
+      return;
+    }
+    const appDir = path.join(GENERATED_APPS_DIR, appId);
+    try { await fs.access(appDir); } catch { res.writeHead(404, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'App not found' })); return; }
+
+    // Deploy via a self-contained git repo in the app folder to avoid touching the main repo
+    const script = [
+      'set -e',
+      'git init',
+      `git checkout -B ${targetBranch}`,
+      "git config user.email 'elideable@local'",
+      "git config user.name 'Elideable'",
+      'git add .',
+      "git commit -m 'Deploy to GitHub Pages' || true",
+      'git remote remove origin 2>/dev/null || true',
+      `git remote add origin ${repoUrl}`,
+      `git push -f origin ${targetBranch}`
+    ].join(' && ');
+
+    try {
+      const proc = spawn('bash', ['-lc', script], { cwd: appDir, env: process.env });
+      let out = ''; let err = '';
+      proc.stdout.on('data', (d) => { out += d.toString(); process.stdout.write(`[deploy-gh] ${d}`); });
+      proc.stderr.on('data', (d) => { err += d.toString(); process.stderr.write(`[deploy-gh] ERR ${d}`); });
+      proc.on('close', (code) => {
+        if (code !== 0) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'git push failed (ensure you have access/auth)', code, out, err }));
+          return;
+        }
+        // Return standard GitHub Pages URL hint if using origin with user/repo
+        let url = null;
+        try {
+          const m = repoUrl.match(/github\.com[:\/](.+?)\/(.+?)\.git$/);
+          if (m) {
+            const owner = m[1]; const repo = m[2];
+            url = targetBranch === 'gh-pages' ? `https://${owner}.github.io/${repo}/` : null;
+          }
+        } catch {}
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, url, out }));
+      });
+    } catch (e) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: e.message }));
+    }
+    return;
+  }
+
+  if (url.pathname === '/api/export.zip' && req.method === 'GET') {
+    const appId = url.searchParams.get('appId');
+    if (!appId) { res.writeHead(400); res.end('Missing appId'); return; }
+    const appDir = path.join(GENERATED_APPS_DIR, appId);
+    try { await fs.access(appDir); } catch { res.writeHead(404); res.end('App not found'); return; }
+
+    // Prefer "zip" CLI if available, otherwise fall back to tar.gz
+    const checkZip = spawn('bash', ['-lc', 'command -v zip >/dev/null 2>&1; echo $?']);
+    let codeStr = '';
+    checkZip.stdout.on('data', (d) => { codeStr += d.toString(); });
+    checkZip.on('close', (/*code*/) => {
+      const hasZip = codeStr.trim() === '0';
+      if (hasZip) {
+        res.writeHead(200, {
+          'Content-Type': 'application/zip',
+          'Content-Disposition': `attachment; filename="app-${appId}.zip"`
+        });
+        const z = spawn('bash', ['-lc', 'zip -r - .'], { cwd: appDir });
+        z.stdout.pipe(res);
+        z.stderr.on('data', (d) => process.stderr.write(`[export-zip] ${d}`));
+        z.on('close', () => res.end());
+      } else {
+        res.writeHead(200, {
+          'Content-Type': 'application/gzip',
+          'Content-Disposition': `attachment; filename="app-${appId}.tar.gz"`
+        });
+        const t = spawn('bash', ['-lc', 'tar -czf - .'], { cwd: appDir });
+        t.stdout.pipe(res);
+        t.stderr.on('data', (d) => process.stderr.write(`[export-tar] ${d}`));
+        t.on('close', () => res.end());
+      }
+    });
+    return;
+  }
+
   if (url.pathname === '/api/ai/summarize' && req.method === 'POST') {
 
     const body = await readJSON(req, res);
@@ -266,140 +402,6 @@ ELIDE CAPABILITIES:
 - Kotlin: High-performance business logic, type-safe operations
 - Java: Enterprise integrations, complex algorithms
 - Mix languages in the same project for optimal performance
-
-  if (url.pathname === '/api/deploy/cloudflare-pages' && req.method === 'POST') {
-    const body = await readJSON(req, res);
-    const { appId, projectName } = body || {};
-    if (!appId || !projectName) {
-      res.writeHead(400, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Missing appId or projectName' }));
-      return;
-    }
-    const appDir = path.join(GENERATED_APPS_DIR, appId);
-    try {
-      await fs.promises.access(appDir);
-    } catch {
-      res.writeHead(404, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'App not found' }));
-      return;
-    }
-
-    try {
-      const args = ['-y', 'wrangler@latest', 'pages', 'deploy', appDir, `--project-name=${projectName}`];
-      console.log('[deploy] npx', args.join(' '));
-      const proc = spawn('npx', args, { cwd: ROOT, env: process.env });
-      let out = '';
-      let err = '';
-      proc.stdout.on('data', (d) => { out += d.toString(); process.stdout.write(`[deploy] ${d}`); });
-      proc.stderr.on('data', (d) => { err += d.toString(); process.stderr.write(`[deploy] ERR ${d}`); });
-      proc.on('close', (code) => {
-        if (code !== 0) {
-          res.writeHead(500, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: 'wrangler failed', code, out, err }));
-          return;
-        }
-        const urlMatch = out.match(/https?:\/\/[^\s]+\.pages\.dev\S*/);
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ ok: true, url: urlMatch ? urlMatch[0] : null, out }));
-      });
-    } catch (e) {
-      res.writeHead(500, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: e.message }));
-    }
-    return;
-  }
-  if (url.pathname === '/api/deploy/github-pages' && req.method === 'POST') {
-    const body = await readJSON(req, res);
-    const { appId, repoUrl, branch } = body || {};
-    const targetBranch = (branch && String(branch).trim()) || 'gh-pages';
-    if (!appId || !repoUrl) {
-      res.writeHead(400, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Missing appId or repoUrl' }));
-      return;
-    }
-    const appDir = path.join(GENERATED_APPS_DIR, appId);
-    try { await fs.access(appDir); } catch { res.writeHead(404, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'App not found' })); return; }
-
-    // Deploy via a self-contained git repo in the app folder to avoid touching the main repo
-    const script = [
-      'set -e',
-      'git init',
-      `git checkout -B ${targetBranch}`,
-      "git config user.email 'elideable@local'",
-      "git config user.name 'Elideable'",
-      'git add .',
-      "git commit -m 'Deploy to GitHub Pages' || true",
-      'git remote remove origin 2>/dev/null || true',
-      `git remote add origin ${repoUrl}`,
-      `git push -f origin ${targetBranch}`
-    ].join(' && ');
-
-    try {
-      const proc = spawn('bash', ['-lc', script], { cwd: appDir, env: process.env });
-      let out = ''; let err = '';
-      proc.stdout.on('data', (d) => { out += d.toString(); process.stdout.write(`[deploy-gh] ${d}`); });
-      proc.stderr.on('data', (d) => { err += d.toString(); process.stderr.write(`[deploy-gh] ERR ${d}`); });
-      proc.on('close', (code) => {
-        if (code !== 0) {
-          res.writeHead(500, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: 'git push failed (ensure you have access/auth)', code, out, err }));
-          return;
-        }
-        // Return standard GitHub Pages URL hint if using origin with user/repo
-        let url = null;
-        try {
-  // Stream a zip of the current app directory
-  if (url.pathname === '/api/export.zip' && req.method === 'GET') {
-    const appId = url.searchParams.get('appId');
-    if (!appId) { res.writeHead(400); res.end('Missing appId'); return; }
-    const appDir = path.join(GENERATED_APPS_DIR, appId);
-    try { await fs.access(appDir); } catch { res.writeHead(404); res.end('App not found'); return; }
-
-    // Prefer "zip" CLI if available, otherwise fall back to tar.gz
-    const checkZip = spawn('bash', ['-lc', 'command -v zip >/dev/null 2>&1; echo $?']);
-    let codeStr = '';
-    checkZip.stdout.on('data', (d) => { codeStr += d.toString(); });
-    checkZip.on('close', (/*code*/) => {
-      const hasZip = codeStr.trim() === '0';
-      if (hasZip) {
-        res.writeHead(200, {
-          'Content-Type': 'application/zip',
-          'Content-Disposition': `attachment; filename="app-${appId}.zip"`
-        });
-        const z = spawn('bash', ['-lc', 'zip -r - .'], { cwd: appDir });
-        z.stdout.pipe(res);
-        z.stderr.on('data', (d) => process.stderr.write(`[export-zip] ${d}`));
-        z.on('close', () => res.end());
-      } else {
-        res.writeHead(200, {
-          'Content-Type': 'application/gzip',
-          'Content-Disposition': `attachment; filename="app-${appId}.tar.gz"`
-        });
-        const t = spawn('bash', ['-lc', 'tar -czf - .'], { cwd: appDir });
-        t.stdout.pipe(res);
-        t.stderr.on('data', (d) => process.stderr.write(`[export-tar] ${d}`));
-        t.on('close', () => res.end());
-      }
-    });
-    return;
-  }
-
-          const m = repoUrl.match(/github\.com[:\/](.+?)\/(.+?)\.git$/);
-          if (m) {
-            const owner = m[1]; const repo = m[2];
-            url = targetBranch === 'gh-pages' ? `https://${owner}.github.io/${repo}/` : null;
-          }
-        } catch {}
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ ok: true, url, out }));
-      });
-    } catch (e) {
-      res.writeHead(500, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: e.message }));
-    }
-    return;
-  }
-
 
 RESPONSE FORMAT - JSON object containing:
 - summary: Brief description highlighting which languages you'll use and why
