@@ -1505,51 +1505,6 @@ async function planWithOpenRouterTools({ prompt, systemPrompt, openrouterKey, mo
   // Add current prompt
   messages.push({ role: 'user', content: prompt });
 
-  const requestBody = {
-    model: model || 'google/gemini-2.0-flash-exp:free',
-    messages: messages,
-    tools: tools,
-    tool_choice: 'auto',
-    max_tokens: 16000, // Increased from 4000 to prevent truncation of tool call arguments
-    temperature: 0.7
-  };
-
-  console.log('[ai] OpenRouter request body:', JSON.stringify(requestBody, null, 2));
-
-  const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${openrouterKey}`,
-      'Content-Type': 'application/json',
-      'HTTP-Referer': 'http://localhost:8787',
-      'X-Title': 'Elideable'
-    },
-    body: JSON.stringify(requestBody)
-  });
-
-  console.log('[ai] OpenRouter response status:', response.status);
-  console.log('[ai] OpenRouter response headers:', Object.fromEntries(response.headers.entries()));
-
-  if (!response.ok) {
-    const errorText = await response.text();
-    console.error(`[ai] OpenRouter API error ${response.status}:`, errorText);
-    throw new Error(`OpenRouter API error: ${response.status} - ${errorText}`);
-  }
-
-  const data = await response.json();
-  console.log('[ai] OpenRouter tool-calling response received');
-  console.log('[ai] OpenRouter response data:', JSON.stringify(data, null, 2));
-
-  if (!data.choices || !data.choices[0] || !data.choices[0].message) {
-    console.error('[ai] Invalid OpenRouter response structure:', data);
-    throw new Error('Invalid OpenRouter response structure');
-  }
-
-  const message = data.choices[0].message;
-  console.log('[ai] OpenRouter message:', JSON.stringify(message, null, 2));
-  const summaryParts = [];
-  const diffs = [];
-
   // Helper to read file for app
   async function readFileForApp(p) {
     if (!appId) return '';
@@ -1562,135 +1517,235 @@ async function planWithOpenRouterTools({ prompt, systemPrompt, openrouterKey, mo
     }
   }
 
-  // Handle tool calls (OpenAI format)
-  if (message.tool_calls && message.tool_calls.length > 0) {
-    console.log(`[ai] OpenRouter returned ${message.tool_calls.length} tool calls`);
-    for (const toolCall of message.tool_calls) {
-      console.log(`[ai] Tool call:`, JSON.stringify(toolCall, null, 2));
+  // Tool calling loop - keep calling until AI returns files or stops calling tools
+  const MAX_ITERATIONS = 10;
+  let iteration = 0;
+  const summaryParts = [];
+  const diffs = [];
 
-      if (toolCall.function.name === 'write_files') {
-        try {
-          console.log(`[ai] Tool call arguments (raw):`, toolCall.function.arguments);
-          const args = JSON.parse(toolCall.function.arguments);
-          const files = args.files || [];
-          console.log(`[ai] OpenRouter tool call: write_files with ${files.length} files`);
+  while (iteration < MAX_ITERATIONS) {
+    iteration++;
+    console.log(`[ai] Tool calling iteration ${iteration}/${MAX_ITERATIONS}`);
 
-          for (const file of files) {
-            diffs.push({ name: file.path, content: file.content || '' });
-          }
-          summaryParts.push(`Generated ${files.length} files: ${files.map(f => f.path).join(', ')}`);
-        } catch (e) {
-          console.error('[ai] Failed to parse OpenRouter tool call arguments:', e.message);
-          console.error('[ai] Raw arguments:', toolCall.function.arguments);
-        }
-      }
+    const requestBody = {
+      model: model || 'google/gemini-2.0-flash-exp:free',
+      messages: messages,
+      tools: tools,
+      tool_choice: 'auto',
+      max_tokens: 16000,
+      temperature: 0.7
+    };
 
-      if (toolCall.function.name === 'str_replace') {
-        try {
-          const args = JSON.parse(toolCall.function.arguments);
-          console.log('[ai] OpenRouter tool call: str_replace for', args.path);
+    const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${openrouterKey}`,
+        'Content-Type': 'application/json',
+        'HTTP-Referer': 'http://localhost:8787',
+        'X-Title': 'Elideable'
+      },
+      body: JSON.stringify(requestBody)
+    });
 
-          const content = await readFileForApp(args.path);
-          if (!content) {
-            console.error('[ai] str_replace failed: file not found:', args.path);
-            summaryParts.push(`Error: File ${args.path} not found`);
-          } else {
-            const oldStr = args.old_str;
-            const newStr = args.new_str;
+    console.log('[ai] OpenRouter response status:', response.status);
 
-            if (!content.includes(oldStr)) {
-              console.error('[ai] str_replace failed: old_str not found in file');
-              summaryParts.push(`Error: String not found in ${args.path}`);
-            } else {
-              const replaced = content.replace(oldStr, newStr);
-              diffs.push({ name: args.path, content: replaced });
-              console.log('[ai] str_replace successful for:', args.path);
-              summaryParts.push(`Edited ${args.path} with str_replace`);
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error(`[ai] OpenRouter API error ${response.status}:`, errorText);
+      throw new Error(`OpenRouter API error: ${response.status} - ${errorText}`);
+    }
+
+    const data = await response.json();
+    console.log('[ai] OpenRouter tool-calling response received');
+
+    if (!data.choices || !data.choices[0] || !data.choices[0].message) {
+      console.error('[ai] Invalid OpenRouter response structure:', data);
+      throw new Error('Invalid OpenRouter response structure');
+    }
+
+    const message = data.choices[0].message;
+    console.log('[ai] OpenRouter message:', JSON.stringify(message, null, 2));
+
+    // Add assistant message to conversation
+    messages.push(message);
+
+    // Handle tool calls (OpenAI format)
+    if (message.tool_calls && message.tool_calls.length > 0) {
+      console.log(`[ai] OpenRouter returned ${message.tool_calls.length} tool calls`);
+
+      // Process each tool call and collect results
+      const toolResults = [];
+
+      for (const toolCall of message.tool_calls) {
+        console.log(`[ai] Tool call:`, JSON.stringify(toolCall, null, 2));
+        let toolResult = { success: false, output: '' };
+
+        if (toolCall.function.name === 'write_files') {
+          try {
+            const args = JSON.parse(toolCall.function.arguments);
+            const files = args.files || [];
+            console.log(`[ai] OpenRouter tool call: write_files with ${files.length} files`);
+
+            for (const file of files) {
+              diffs.push({ name: file.path, content: file.content || '' });
             }
+            summaryParts.push(`Generated ${files.length} files: ${files.map(f => f.path).join(', ')}`);
+            toolResult = { success: true, output: `Created ${files.length} files` };
+          } catch (e) {
+            console.error('[ai] Failed to parse write_files arguments:', e.message);
+            toolResult = { success: false, output: `Error: ${e.message}` };
           }
-        } catch (e) {
-          console.error('[ai] Failed to process str_replace:', e.message);
         }
-      }
 
-      if (toolCall.function.name === 'apply_diff') {
-        try {
-          const args = JSON.parse(toolCall.function.arguments);
-          console.log('[ai] OpenRouter tool call: apply_diff for', args.path);
+        if (toolCall.function.name === 'str_replace') {
+          try {
+            const args = JSON.parse(toolCall.function.arguments);
+            console.log('[ai] OpenRouter tool call: str_replace for', args.path);
 
-          const content = await readFileForApp(args.path);
-          if (!content) {
-            console.error('[ai] apply_diff failed: file not found:', args.path);
-            summaryParts.push(`Error: File ${args.path} not found`);
-          } else {
-            // Simple unified diff parser
-            const diffLines = args.diff.split('\n');
-            const lines = content.split('\n');
-            let result = [];
-            let lineIdx = 0;
+            const content = await readFileForApp(args.path);
+            if (!content) {
+              console.error('[ai] str_replace failed: file not found:', args.path);
+              summaryParts.push(`Error: File ${args.path} not found`);
+              toolResult = { success: false, output: `File ${args.path} not found` };
+            } else {
+              const oldStr = args.old_str;
+              const newStr = args.new_str;
 
-            for (const diffLine of diffLines) {
-              if (diffLine.startsWith('@@')) {
-                const match = diffLine.match(/@@ -(\d+),?(\d*) \+(\d+),?(\d*) @@/);
-                if (match) {
-                  const oldStart = parseInt(match[1]) - 1;
-                  lineIdx = oldStart;
-                }
-              } else if (diffLine.startsWith('-')) {
-                lineIdx++;
-              } else if (diffLine.startsWith('+')) {
-                result.push(diffLine.substring(1));
-              } else if (diffLine.startsWith(' ')) {
-                if (lineIdx < lines.length) {
-                  result.push(lines[lineIdx]);
-                  lineIdx++;
-                }
+              if (!content.includes(oldStr)) {
+                console.error('[ai] str_replace failed: old_str not found in file');
+                summaryParts.push(`Error: String not found in ${args.path}`);
+                toolResult = { success: false, output: `String not found in ${args.path}` };
+              } else {
+                const replaced = content.replace(oldStr, newStr);
+                diffs.push({ name: args.path, content: replaced });
+                console.log('[ai] str_replace successful for:', args.path);
+                summaryParts.push(`Edited ${args.path} with str_replace`);
+                toolResult = { success: true, output: `Successfully edited ${args.path}` };
               }
             }
+          } catch (e) {
+            console.error('[ai] Failed to process str_replace:', e.message);
+            toolResult = { success: false, output: `Error: ${e.message}` };
+          }
+        }
 
-            while (lineIdx < lines.length) {
-              result.push(lines[lineIdx]);
-              lineIdx++;
+        if (toolCall.function.name === 'apply_diff') {
+          try {
+            const args = JSON.parse(toolCall.function.arguments);
+            console.log('[ai] OpenRouter tool call: apply_diff for', args.path);
+
+            const content = await readFileForApp(args.path);
+            if (!content) {
+              console.error('[ai] apply_diff failed: file not found:', args.path);
+              summaryParts.push(`Error: File ${args.path} not found`);
+              toolResult = { success: false, output: `File ${args.path} not found` };
+            } else {
+              // Simple unified diff parser
+              const diffLines = args.diff.split('\n');
+              const lines = content.split('\n');
+              let result = [];
+              let lineIdx = 0;
+
+              for (const diffLine of diffLines) {
+                if (diffLine.startsWith('@@')) {
+                  const match = diffLine.match(/@@ -(\d+),?(\d*) \+(\d+),?(\d*) @@/);
+                  if (match) {
+                    const oldStart = parseInt(match[1]) - 1;
+                    lineIdx = oldStart;
+                  }
+                } else if (diffLine.startsWith('-')) {
+                  lineIdx++;
+                } else if (diffLine.startsWith('+')) {
+                  result.push(diffLine.substring(1));
+                } else if (diffLine.startsWith(' ')) {
+                  if (lineIdx < lines.length) {
+                    result.push(lines[lineIdx]);
+                    lineIdx++;
+                  }
+                }
+              }
+
+              while (lineIdx < lines.length) {
+                result.push(lines[lineIdx]);
+                lineIdx++;
+              }
+
+              diffs.push({ name: args.path, content: result.join('\n') });
+              console.log('[ai] apply_diff successful for:', args.path);
+              summaryParts.push(`Applied diff to ${args.path}`);
+              toolResult = { success: true, output: `Successfully applied diff to ${args.path}` };
             }
+          } catch (e) {
+            console.error('[ai] Failed to process apply_diff:', e.message);
+            summaryParts.push(`Error applying diff: ${e.message}`);
+            toolResult = { success: false, output: `Error: ${e.message}` };
+          }
+        }
 
-            diffs.push({ name: args.path, content: result.join('\n') });
-            console.log('[ai] apply_diff successful for:', args.path);
-            summaryParts.push(`Applied diff to ${args.path}`);
+        if (toolCall.function.name === 'read_file') {
+          try {
+            const args = JSON.parse(toolCall.function.arguments);
+            const content = await readFileForApp(args.path);
+            console.log(`[ai] read_file: ${args.path} (${content.length} bytes)`);
+            summaryParts.push(`Read ${args.path} (${content.length} bytes)`);
+            toolResult = { success: true, output: content || `File ${args.path} is empty or not found` };
+          } catch (e) {
+            console.error('[ai] Failed to process read_file:', e.message);
+            toolResult = { success: false, output: `Error: ${e.message}` };
+          }
+        }
+
+        // Add tool result to messages for next iteration
+        toolResults.push({
+          role: 'tool',
+          tool_call_id: toolCall.id,
+          content: toolResult.output
+        });
+      }
+
+      // Add all tool results to messages
+      messages.push(...toolResults);
+
+      // If we got file-modifying tool calls (write_files, str_replace, apply_diff), we're done
+      const hasFileModifications = message.tool_calls.some(tc =>
+        tc.function.name === 'write_files' ||
+        tc.function.name === 'str_replace' ||
+        tc.function.name === 'apply_diff'
+      );
+
+      if (hasFileModifications) {
+        console.log('[ai] File modifications detected, ending tool calling loop');
+        break;
+      }
+
+      // Otherwise continue loop to let AI make more tool calls
+      console.log('[ai] No file modifications yet, continuing tool calling loop');
+    } else {
+      // No tool calls - AI is done
+      console.log('[ai] No tool calls in OpenRouter response, ending loop');
+
+      // Try to parse content as JSON (fallback for models that don't use tools)
+      if (diffs.length === 0 && message.content) {
+        try {
+          const parsed = JSON.parse(message.content);
+          if (parsed.files && Array.isArray(parsed.files)) {
+            for (const file of parsed.files) {
+              diffs.push({ name: file.name || file.path, content: file.content || '' });
+            }
+            summaryParts.push(`Parsed ${parsed.files.length} files from JSON response`);
           }
         } catch (e) {
-          console.error('[ai] Failed to process apply_diff:', e.message);
-          summaryParts.push(`Error applying diff: ${e.message}`);
+          console.log('[ai] OpenRouter response is not JSON, treating as text');
+          summaryParts.push('Generated text response (no files)');
         }
       }
-
-      if (toolCall.function.name === 'read_file') {
-        try {
-          const args = JSON.parse(toolCall.function.arguments);
-          const content = await readFileForApp(args.path);
-          summaryParts.push(`Read ${args.path} (${content.length} bytes)`);
-        } catch (e) {
-          console.error('[ai] Failed to process read_file:', e.message);
-        }
-      }
+      break;
     }
-  } else {
-    console.log('[ai] No tool calls in OpenRouter response');
   }
 
-  // If no tool calls, try to parse content as JSON (fallback)
-  if (diffs.length === 0 && message.content) {
-    try {
-      const parsed = JSON.parse(message.content);
-      if (parsed.files && Array.isArray(parsed.files)) {
-        for (const file of parsed.files) {
-          diffs.push({ name: file.name || file.path, content: file.content || '' });
-        }
-        summaryParts.push(`Parsed ${parsed.files.length} files from JSON response`);
-      }
-    } catch (e) {
-      console.log('[ai] OpenRouter response is not JSON, treating as text');
-      summaryParts.push('Generated text response (no files)');
-    }
+  if (iteration >= MAX_ITERATIONS) {
+    console.warn('[ai] Tool calling loop reached maximum iterations');
+    summaryParts.push('Warning: Reached maximum tool calling iterations');
   }
 
   const summary = summaryParts.join('\n\n');
