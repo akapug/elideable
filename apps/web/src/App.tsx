@@ -213,6 +213,19 @@ function GeneratedPreview({ previewUrl, currentAppId }: { previewUrl?: string, c
       >
         🐙 Deploy (GH Pages)
       </button>
+      {/* Export zip */}
+      <button
+        onClick={() => {
+          if (!currentAppId) return;
+          const url = `http://localhost:8787/api/export.zip?appId=${encodeURIComponent(currentAppId)}`;
+          window.open(url, '_blank');
+        }}
+        className="absolute top-2 right-[22rem] z-10 bg-amber-700/90 hover:bg-amber-600 text-white px-3 py-1 rounded-md text-xs font-medium border border-amber-500/50 hover:border-amber-400 transition-colors"
+        title="Export current app as .zip"
+      >
+        📦 Export .zip
+      </button>
+
 
 
       <div className="w-full h-full bg-white text-black rounded-lg shadow-inner">

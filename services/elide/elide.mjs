@@ -348,6 +348,42 @@ ELIDE CAPABILITIES:
         // Return standard GitHub Pages URL hint if using origin with user/repo
         let url = null;
         try {
+  // Stream a zip of the current app directory
+  if (url.pathname === '/api/export.zip' && req.method === 'GET') {
+    const appId = url.searchParams.get('appId');
+    if (!appId) { res.writeHead(400); res.end('Missing appId'); return; }
+    const appDir = path.join(GENERATED_APPS_DIR, appId);
+    try { await fs.promises.access(appDir); } catch { res.writeHead(404); res.end('App not found'); return; }
+
+    // Prefer "zip" CLI if available, otherwise fall back to tar.gz
+    const checkZip = spawn('bash', ['-lc', 'command -v zip >/dev/null 2>&1; echo $?']);
+    let codeStr = '';
+    checkZip.stdout.on('data', (d) => { codeStr += d.toString(); });
+    checkZip.on('close', (/*code*/) => {
+      const hasZip = codeStr.trim() === '0';
+      if (hasZip) {
+        res.writeHead(200, {
+          'Content-Type': 'application/zip',
+          'Content-Disposition': `attachment; filename="app-${appId}.zip"`
+        });
+        const z = spawn('bash', ['-lc', 'zip -r - .'], { cwd: appDir });
+        z.stdout.pipe(res);
+        z.stderr.on('data', (d) => process.stderr.write(`[export-zip] ${d}`));
+        z.on('close', () => res.end());
+      } else {
+        res.writeHead(200, {
+          'Content-Type': 'application/gzip',
+          'Content-Disposition': `attachment; filename="app-${appId}.tar.gz"`
+        });
+        const t = spawn('bash', ['-lc', 'tar -czf - .'], { cwd: appDir });
+        t.stdout.pipe(res);
+        t.stderr.on('data', (d) => process.stderr.write(`[export-tar] ${d}`));
+        t.on('close', () => res.end());
+      }
+    });
+    return;
+  }
+
           const m = repoUrl.match(/github\.com[:\/](.+?)\/(.+?)\.git$/);
           if (m) {
             const owner = m[1]; const repo = m[2];
@@ -1599,7 +1635,21 @@ async function buildAppContext(appId, { maxFiles = 10, maxCharsPerFile = 400 } =
       }
     };
     walk(tree);
-    filePaths.sort();
+    // rank files: entry points and recently edited likely first
+    const score = (p) => {
+      let s = 0;
+      if (/^index\.(html|tsx?|jsx?)$/i.test(p)) s += 100;
+      if (/^main\.(ts|js)x?$/i.test(p)) s += 80;
+      if (/^app\.(ts|js)x?$/i.test(p)) s += 70;
+      if (/^styles?\.(css|scss)$/i.test(p)) s += 60;
+      if (/^src\//i.test(p)) s += 50;
+      if (/components?\//i.test(p)) s += 40;
+      if (/\.css$/i.test(p)) s += 10;
+      if (/\.json$/i.test(p)) s -= 10;
+      return s;
+    };
+    filePaths.sort((a,b) => score(b) - score(a) || a.localeCompare(b));
+
     const selected = filePaths.slice(0, maxFiles);
     const parts = [];
     for (const rel of selected) {
