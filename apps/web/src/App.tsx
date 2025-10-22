@@ -164,6 +164,7 @@ function GeneratedPreview({ previewUrl }: { previewUrl?: string }) {
 
       <div className="w-full h-full bg-white text-black rounded-lg shadow-inner">
         <iframe
+          key={previewUrl || 'preview'}
           src={previewUrl}
           className="w-full h-full border-0 rounded-lg bg-white"
           title="Generated Elide App Preview"

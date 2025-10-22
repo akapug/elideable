@@ -15,7 +15,8 @@ const PROVIDER = process.env.ELV_PROVIDER || 'openrouter';
 
 // Track running Elide processes
 const runningApps = new Map(); // appId -> { process, port, url }
-let nextPort = 9000;
+const PREVIEW_PORT = 9000; // Always bind the active preview to this fixed port
+let nextPort = PREVIEW_PORT;
 
 // Initialize AI providers
 let genAI, anthropic, openrouterKey;
@@ -93,9 +94,11 @@ const server = http.createServer(async (req, res) => {
 
       // Restart the app on same appId
       const { port, url } = await startElideApp(appId, appDir);
+      // Add a cache-busting query so browsers never show a stale cached page in new tabs
+      const previewUrl = `${url}?appId=${encodeURIComponent(appId)}&ts=${Date.now()}`;
 
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ appId, changed, previewUrl: url, port }));
+      res.end(JSON.stringify({ appId, changed, previewUrl, port }));
     } catch (error) {
       console.error('[elide] Failed to create/start app:', error);
       res.writeHead(500, { 'Content-Type': 'application/json' });
@@ -114,8 +117,10 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(404); res.end('App not found or not running'); return;
     }
 
+    // Return cache-busted URL so a new tab always fetches fresh content
+    const previewUrl = `${appUrl}?ts=${Date.now()}`;
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ url: appUrl }));
+    res.end(JSON.stringify({ url: previewUrl }));
     return;
   }
   if (url.pathname === '/api/files/tree' && req.method === 'GET') {
@@ -1200,10 +1205,10 @@ dependencies {
 
 // --- Process Management ---
 async function startElideApp(appId, appDir) {
-  // Stop existing app if running
-  await stopElideApp(appId);
+  // Enforce single active preview: stop all running preview apps first
+  await stopAllElideApps();
 
-  const port = nextPort++;
+  const port = PREVIEW_PORT;
   console.log(`[elide] Starting app ${appId} on port ${port}...`);
 
   return new Promise((resolve, reject) => {
@@ -1452,6 +1457,17 @@ function setupProcessHandlers(process, appId, port, resolve, reject) {
     reject(err);
   });
 }
+async function stopAllElideApps() {
+  for (const [id, app] of runningApps.entries()) {
+    try {
+      console.log(`[elide] Stopping app ${id}...`);
+      app.process.kill();
+    } catch {}
+    runningApps.delete(id);
+  }
+  nextPort = PREVIEW_PORT;
+}
+
 
 async function stopElideApp(appId) {
   const app = runningApps.get(appId);
