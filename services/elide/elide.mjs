@@ -9,6 +9,8 @@ import { ROOT, GENERATED_APPS_DIR } from './lib/paths.mjs';
 import { readJSON } from './lib/body.mjs';
 import { buildAppContext, readTreeFromDir } from './lib/context.mjs';
 import { streamAppArchive } from './lib/zip.mjs';
+import { buildSystemPrompt as buildSimplePrompt, buildUserPrompt as buildSimpleUserPrompt } from './prompts/qwen-plan-v2.mjs';
+import { buildSystemPrompt as buildAdvancedPrompt, buildUserPrompt as buildAdvancedUserPrompt } from './prompts/advanced-plan.mjs';
 
 const PORT = Number(process.env.PORT_ELIDE || 8787);
 const PROVIDER = process.env.ELV_PROVIDER || 'openrouter';
@@ -763,64 +765,6 @@ async function planWithLocalElide(prompt, model = null, options = {}) {
 }
 
 
-// Local provider via direct Node fetch to Ollama (robust fallback while Elide run is flaky)
-async function planWithLocalOllamaNode(prompt, model = null, options = {}) {
-  const baseUrl = process.env.OLLAMA_BASE_URL || 'http://127.0.0.1:11434';
-  const mdl = (process.env.OLLAMA_MODEL && process.env.OLLAMA_MODEL.trim()) ? process.env.OLLAMA_MODEL : (model || 'gemma2:2b-instruct-q8_0');
-  const system = [
-    'You are Elideable Plan Writer. Return ONLY strict JSON matching this schema:',
-    '{\n  "plan": { "message": string, "prompt": string },\n  "diffs": [ { "name": string, "content": string } ]\n}',
-    'ALWAYS include at least one file in diffs. Prefer a single index.html for tiny demos.',
-    'Do not include markdown fences. Do not include explanations.',
-    options?.appId ? 'You are improving an existing app. Only include CHANGED or NEW files in diffs; leave all other files untouched. Preserve existing structure.' : ''
-  ].filter(Boolean).join('\n');
-  const body = {
-    model: mdl,
-    stream: false,
-    format: 'json',
-    options: { temperature: 0.3 },
-    messages: [ { role: 'system', content: system }, { role: 'user', content: String(prompt || '') } ]
-  };
-  if (options?.appId) {
-    try {
-      const ctx = await buildAppContext(options.appId, { maxFiles: 12, maxCharsPerFile: 500 });
-      if (ctx && ctx.length > 0) {
-        body.messages.push({ role: 'user', content: `Active app id: ${options.appId}\nCurrent app files (partial):\n${ctx}\n\nEdit the app in-place. Only output CHANGED or NEW files in diffs.` });
-      }
-    } catch {}
-  }
-  try {
-    const res = await fetch(`${baseUrl}/api/chat`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-    if (!res.ok) throw new Error(`Ollama HTTP ${res.status}`);
-    const data = await res.json();
-    const content = data?.message?.content || '';
-    let parsed = null;
-    try { parsed = JSON.parse(String(content).trim()); } catch {}
-
-    // Tolerant fallback: if not strict JSON, accept raw HTML or heuristically mirror the prompt
-    if (!parsed || !Array.isArray(parsed.diffs) || parsed.diffs.length === 0) {
-      // Try to extract full HTML from the model output
-      const htmlMatch = String(content).match(/<html[\s\S]*<\/html>/i) || String(content).match(/<!doctype html[\s\S]*<\/html>/i);
-      if (htmlMatch) {
-        parsed = { plan: { message: 'Generated HTML from model output.', prompt }, diffs: [ { name: 'index.html', content: htmlMatch[0] } ] };
-      } else {
-        // Heuristic: allow `h1: ...` hint in prompt to define the heading
-        const h1Match = String(prompt || '').match(/h1:\s*([^\n]+)/i);
-        const h1 = (h1Match && h1Match[1] && h1Match[1].trim()) ? h1Match[1].trim() : 'Hello from Gemma!';
-        parsed = {
-          plan: { message: 'Heuristic fallback from prompt.', prompt },
-          diffs: [ { name: 'index.html', content: `<!doctype html><html><head><meta charset="utf-8"/><title>Hello</title></head><body><h1>${h1}</h1></body></html>` } ]
-        };
-      }
-    } else {
-      parsed.plan = parsed.plan || { message: 'Generated plan', prompt };
-    }
-    return parsed;
-  } catch (e) {
-    console.warn('[ai] local ollama error:', e?.message || e);
-    return fallbackGeneratePlan(prompt);
-  }
-}
 
   let response = { content: [], stop_reason: null, usage: null };
   for await (const chunk of stream) {
@@ -982,32 +926,40 @@ async function planWithLocalElide(prompt, model = null, options = {}) {
   });
 }
 
-// Local provider via direct Node fetch to Ollama (robust fallback while Elide run is flaky)
+// Local provider via direct Node fetch to Ollama (v2.0 with improved prompting)
 async function planWithLocalOllamaNode(prompt, model = null, options = {}) {
   const baseUrl = process.env.OLLAMA_BASE_URL || 'http://127.0.0.1:11434';
   const mdl = (process.env.OLLAMA_MODEL && process.env.OLLAMA_MODEL.trim()) ? process.env.OLLAMA_MODEL : (model || 'gemma2:2b-instruct-q8_0');
-  const system = [
-    'You are Elideable Plan Writer. Return ONLY strict JSON matching this schema:',
-    '{\n  "plan": { "message": string, "prompt": string },\n  "diffs": [ { "name": string, "content": string } ]\n}',
-    'ALWAYS include at least one file in diffs. Prefer a single index.html for tiny demos.',
-    'Do not include markdown fences. Do not include explanations.',
-    options?.appId ? 'You are improving an existing app. Only include CHANGED or NEW files in diffs; leave all other files untouched. Preserve existing structure.' : ''
-  ].filter(Boolean).join('\n');
+
+  // Build context for editing mode
+  let appContext = null;
+  if (options?.appId) {
+    try {
+      appContext = await buildAppContext(options.appId, { maxFiles: 12, maxCharsPerFile: 500 });
+    } catch {}
+  }
+
+  // Choose prompt based on model size
+  // Small models (< 3B params): simple, concrete prompts
+  // Large models (7B+ params): advanced, detailed prompts
+  const isLargeModel = mdl.includes('7b') || mdl.includes('14b') || mdl.includes('32b') || mdl.includes('coder');
+  const buildSystemPrompt = isLargeModel ? buildAdvancedPrompt : buildSimplePrompt;
+  const buildUserPrompt = isLargeModel ? buildAdvancedUserPrompt : buildSimpleUserPrompt;
+
+  const systemPrompt = buildSystemPrompt({ appId: options?.appId, appContext });
+  const userPrompt = buildUserPrompt(prompt, options);
+
   const body = {
     model: mdl,
     stream: false,
     format: 'json',
     options: { temperature: 0.3 },
-    messages: [ { role: 'system', content: system }, { role: 'user', content: String(prompt || '') } ]
+    messages: [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: userPrompt }
+    ]
   };
-  if (options?.appId) {
-    try {
-      const ctx = await buildAppContext(options.appId, { maxFiles: 12, maxCharsPerFile: 500 });
-      if (ctx && ctx.length > 0) {
-        body.messages.push({ role: 'user', content: `Active app id: ${options.appId}\nCurrent app files (partial):\n${ctx}\n\nEdit the app in-place. Only output CHANGED or NEW files in diffs.` });
-      }
-    } catch {}
-  }
+
   try {
     const res = await fetch(`${baseUrl}/api/chat`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
     if (!res.ok) throw new Error(`Ollama HTTP ${res.status}`);
@@ -1025,10 +977,10 @@ async function planWithLocalOllamaNode(prompt, model = null, options = {}) {
       } else {
         // Heuristic: allow `h1: ...` hint in prompt to define the heading
         const h1Match = String(prompt || '').match(/h1:\s*([^\n]+)/i);
-        const h1 = (h1Match && h1Match[1] && h1Match[1].trim()) ? h1Match[1].trim() : 'Hello from Gemma!';
+        const h1 = (h1Match && h1Match[1] && h1Match[1].trim()) ? h1Match[1].trim() : 'Hello from Qwen!';
         parsed = {
           plan: { message: 'Heuristic fallback from prompt.', prompt },
-          diffs: [ { name: 'index.html', content: `<!doctype html><html><head><meta charset=\"utf-8\"/><title>Hello</title></head><body><h1>${h1}</h1></body></html>` } ]
+          diffs: [ { name: 'index.html', content: `<!doctype html><html><head><meta charset="utf-8"/><title>Hello</title></head><body><h1>${h1}</h1></body></html>` } ]
         };
       }
     } else {
