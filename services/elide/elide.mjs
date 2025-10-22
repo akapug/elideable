@@ -75,8 +75,12 @@ const server = http.createServer(async (req, res) => {
           appId: body?.appId || null,
           history: body?.history || [],
           onProgress: (chunk) => {
-            // Send progress updates to client
+            // Send progress updates to client (chat streaming)
             res.write(`data: ${JSON.stringify({ type: 'progress', content: chunk })}\n\n`);
+          },
+          onCodeProgress: (data) => {
+            // Send code streaming updates to client (file-by-file streaming)
+            res.write(`data: ${JSON.stringify({ type: 'code_progress', ...data })}\n\n`);
           }
         });
 
@@ -553,7 +557,8 @@ async function generatePlan(prompt, model = null, options = {}) {
         openrouterKey,
         model,
         appId: options?.appId || null,
-        history: options?.history || []
+        history: options?.history || [],
+        onCodeProgress: options?.onCodeProgress
       });
       return toolPlan;
     } else {
@@ -1219,7 +1224,261 @@ async function planWithLocalElide(prompt, model = null, options = {}) {
   });
 }
 
-// Local provider via direct Node fetch to Ollama (v3.0 with streaming and 2-minute timeout)
+// --- Tool Planning Helpers (Ollama) ---
+async function planWithOllamaTools({ prompt, systemPrompt, userPrompt, baseUrl, model, appId, history, onProgress, onCodeProgress }) {
+  const tools = [
+    {
+      type: 'function',
+      function: {
+        name: 'write_files',
+        description: 'Create NEW files or COMPLETELY REWRITE existing files. Use this ONLY when creating new files or when you need to replace the entire file content. For small edits to existing files, use str_replace instead.',
+        parameters: {
+          type: 'object',
+          properties: {
+            files: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: {
+                  path: { type: 'string', description: 'File path relative to app root (e.g., "server.ts", "analyzer.py")' },
+                  content: { type: 'string', description: 'Complete file content' }
+                },
+                required: ['path', 'content']
+              }
+            }
+          },
+          required: ['files']
+        }
+      }
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'str_replace',
+        description: 'Make targeted edits to existing files by replacing specific strings.',
+        parameters: {
+          type: 'object',
+          properties: {
+            path: { type: 'string', description: 'File path relative to app root' },
+            old_str: { type: 'string', description: 'Exact string to find and replace' },
+            new_str: { type: 'string', description: 'Replacement string' }
+          },
+          required: ['path', 'old_str', 'new_str']
+        }
+      }
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'read_file',
+        description: 'Read the current content of a file.',
+        parameters: {
+          type: 'object',
+          properties: {
+            path: { type: 'string', description: 'File path relative to app root' }
+          },
+          required: ['path']
+        }
+      }
+    }
+  ];
+
+  console.log('[ai] Making Ollama tool-calling request with model:', model);
+
+  // Build messages array
+  const messages = [
+    { role: 'system', content: systemPrompt }
+  ];
+
+  if (history && Array.isArray(history) && history.length > 0) {
+    messages.push(...history);
+  }
+
+  messages.push({ role: 'user', content: userPrompt });
+
+  // Helper to read file for app
+  async function readFileForApp(p) {
+    if (!appId) return '';
+    try {
+      const appDir = path.join(GENERATED_APPS_DIR, appId);
+      const full = path.join(appDir, p);
+      return await fs.readFile(full, 'utf8');
+    } catch {
+      return '';
+    }
+  }
+
+  // Tool calling loop
+  const MAX_ITERATIONS = 10;
+  let iteration = 0;
+  const summaryParts = [];
+  const diffs = [];
+  const timeoutMs = 300000; // 5 minutes for 32B
+
+  while (iteration < MAX_ITERATIONS) {
+    iteration++;
+    console.log(`[ai] Ollama tool calling iteration ${iteration}/${MAX_ITERATIONS}`);
+
+    const requestBody = {
+      model: model,
+      messages: messages,
+      tools: tools,
+      stream: false, // Disable streaming for tool calls to get complete response
+      options: { temperature: 0.3 }
+    };
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+    try {
+      const response = await fetch(`${baseUrl}/api/chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(requestBody),
+        signal: controller.signal
+      });
+
+      clearTimeout(timeout);
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error(`[ai] Ollama API error ${response.status}:`, errorText);
+        throw new Error(`Ollama API error: ${response.status}`);
+      }
+
+      const data = await response.json();
+      console.log('[ai] Ollama tool-calling response received');
+
+      if (!data.message) {
+        console.error('[ai] Invalid Ollama response structure:', data);
+        throw new Error('Invalid Ollama response structure');
+      }
+
+      const message = data.message;
+      console.log('[ai] Ollama message:', JSON.stringify(message, null, 2));
+
+      // Add assistant message to conversation
+      messages.push(message);
+
+      // Handle tool calls
+      if (message.tool_calls && message.tool_calls.length > 0) {
+        console.log(`[ai] Ollama returned ${message.tool_calls.length} tool calls`);
+
+        const toolResults = [];
+
+        for (const toolCall of message.tool_calls) {
+          console.log(`[ai] Tool call:`, JSON.stringify(toolCall, null, 2));
+          let toolResult = { success: false, output: '' };
+
+          if (toolCall.function.name === 'write_files') {
+            try {
+              const args = toolCall.function.arguments;
+              const files = args.files || [];
+              console.log(`[ai] Ollama tool call: write_files with ${files.length} files`);
+
+              for (const file of files) {
+                diffs.push({ name: file.path, content: file.content || '' });
+
+                // Stream code to editor if callback provided
+                if (onCodeProgress && typeof onCodeProgress === 'function') {
+                  onCodeProgress({
+                    file: file.path,
+                    content: file.content || '',
+                    status: 'complete'
+                  });
+                }
+              }
+              summaryParts.push(`Generated ${files.length} files: ${files.map(f => f.path).join(', ')}`);
+              toolResult = { success: true, output: `Created ${files.length} files` };
+            } catch (e) {
+              console.error('[ai] Failed to process write_files:', e.message);
+              toolResult = { success: false, output: `Error: ${e.message}` };
+            }
+          }
+
+          if (toolCall.function.name === 'str_replace') {
+            try {
+              const args = toolCall.function.arguments;
+              console.log('[ai] Ollama tool call: str_replace for', args.path);
+
+              const content = await readFileForApp(args.path);
+              if (!content) {
+                summaryParts.push(`Error: File ${args.path} not found`);
+                toolResult = { success: false, output: `File ${args.path} not found` };
+              } else if (!content.includes(args.old_str)) {
+                summaryParts.push(`Error: String not found in ${args.path}`);
+                toolResult = { success: false, output: `String not found in ${args.path}` };
+              } else {
+                const replaced = content.replace(args.old_str, args.new_str);
+                diffs.push({ name: args.path, content: replaced });
+                summaryParts.push(`Edited ${args.path} with str_replace`);
+                toolResult = { success: true, output: `Successfully edited ${args.path}` };
+              }
+            } catch (e) {
+              console.error('[ai] Failed to process str_replace:', e.message);
+              toolResult = { success: false, output: `Error: ${e.message}` };
+            }
+          }
+
+          if (toolCall.function.name === 'read_file') {
+            try {
+              const args = toolCall.function.arguments;
+              const content = await readFileForApp(args.path);
+              console.log(`[ai] read_file: ${args.path} (${content.length} bytes)`);
+              summaryParts.push(`Read ${args.path} (${content.length} bytes)`);
+              toolResult = { success: true, output: content || `File ${args.path} is empty or not found` };
+            } catch (e) {
+              console.error('[ai] Failed to process read_file:', e.message);
+              toolResult = { success: false, output: `Error: ${e.message}` };
+            }
+          }
+
+          // Add tool result to messages
+          toolResults.push({
+            role: 'tool',
+            content: toolResult.output
+          });
+        }
+
+        // Add all tool results to messages
+        messages.push(...toolResults);
+
+        // If we got file-modifying tool calls, we're done
+        const hasFileModifications = message.tool_calls.some(tc =>
+          tc.function.name === 'write_files' || tc.function.name === 'str_replace'
+        );
+
+        if (hasFileModifications) {
+          console.log('[ai] File modifications detected, ending tool calling loop');
+          break;
+        }
+
+        console.log('[ai] No file modifications yet, continuing tool calling loop');
+      } else {
+        // No tool calls - AI is done
+        console.log('[ai] No tool calls in Ollama response, ending loop');
+        break;
+      }
+    } catch (e) {
+      clearTimeout(timeout);
+      if (e.name === 'AbortError') {
+        console.warn('[ai] Ollama tool calling timeout after 5 minutes');
+        throw new Error('Ollama timed out after 5 minutes');
+      }
+      throw e;
+    }
+  }
+
+  if (iteration >= MAX_ITERATIONS) {
+    console.warn('[ai] Tool calling loop reached maximum iterations');
+    summaryParts.push('Warning: Reached maximum tool calling iterations');
+  }
+
+  const summary = summaryParts.join('\n\n');
+  return { plan: { message: summary || 'Generated plan with Ollama tools.', prompt }, diffs };
+}
+
+// Local provider via direct Node fetch to Ollama (v4.0 with tool calling for 32B models)
 async function planWithLocalOllamaNode(prompt, model = null, options = {}) {
   const baseUrl = process.env.OLLAMA_BASE_URL || 'http://127.0.0.1:11434';
 
@@ -1241,9 +1500,21 @@ async function planWithLocalOllamaNode(prompt, model = null, options = {}) {
     } catch {}
   }
 
-  // Local models ALWAYS use simple prompts (remote models use advanced prompts)
-  const systemPrompt = buildSimplePrompt({ appId: options?.appId, appContext });
-  const userPrompt = buildSimpleUserPrompt(prompt, options);
+  // 32B models use advanced prompts with tool calling, smaller models use simple prompts
+  const is32BModel = mdl.includes('32b');
+  const systemPrompt = is32BModel
+    ? buildAdvancedPrompt({ appId: options?.appId, appContext })
+    : buildSimplePrompt({ appId: options?.appId, appContext });
+  const userPrompt = is32BModel
+    ? buildAdvancedUserPrompt(prompt, options)
+    : buildSimpleUserPrompt(prompt, options);
+
+  console.log(`[ai] Using ${is32BModel ? 'ADVANCED' : 'SIMPLE'} prompts for ${mdl}`);
+
+  // If 32B model, use tool calling
+  if (is32BModel) {
+    return await planWithOllamaTools({ prompt, systemPrompt, userPrompt, baseUrl, model: mdl, appId: options?.appId, history: options?.history, onProgress: options?.onProgress, onCodeProgress: options?.onCodeProgress });
+  }
 
   // Build messages array with history
   const messages = [
@@ -1258,12 +1529,86 @@ async function planWithLocalOllamaNode(prompt, model = null, options = {}) {
   // Add current prompt
   messages.push({ role: 'user', content: userPrompt });
 
+  // 32B models get tool calling support
+  const tools = is32BModel ? [
+    {
+      type: 'function',
+      function: {
+        name: 'write_files',
+        description: 'Create NEW files or COMPLETELY REWRITE existing files. Use this ONLY when creating new files or when you need to replace the entire file content. For small edits to existing files, use str_replace instead.',
+        parameters: {
+          type: 'object',
+          properties: {
+            files: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: {
+                  path: { type: 'string', description: 'File path relative to app root (e.g., "index.html", "src/app.js")' },
+                  content: { type: 'string', description: 'Complete file content' }
+                },
+                required: ['path', 'content']
+              }
+            }
+          },
+          required: ['files']
+        }
+      }
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'str_replace',
+        description: 'Make targeted edits to existing files by replacing specific strings. Use this for small, precise changes (< 50 lines). The old_str must match EXACTLY including all whitespace, indentation, and line breaks.',
+        parameters: {
+          type: 'object',
+          properties: {
+            path: { type: 'string', description: 'File path relative to app root' },
+            old_str: { type: 'string', description: 'Exact string to find and replace. Must match exactly including whitespace.' },
+            new_str: { type: 'string', description: 'Replacement string' }
+          },
+          required: ['path', 'old_str', 'new_str']
+        }
+      }
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'apply_diff',
+        description: 'Apply a unified diff patch to a file. Use this for multiple changes in one file or when str_replace would be too fragile.',
+        parameters: {
+          type: 'object',
+          properties: {
+            path: { type: 'string', description: 'File path relative to app root' },
+            diff: { type: 'string', description: 'Unified diff format patch' }
+          },
+          required: ['path', 'diff']
+        }
+      }
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'read_file',
+        description: 'Read the current content of a file. Use this before making edits to see the exact formatting.',
+        parameters: {
+          type: 'object',
+          properties: {
+            path: { type: 'string', description: 'File path relative to app root' }
+          },
+          required: ['path']
+        }
+      }
+    }
+  ] : null;
+
   const body = {
     model: mdl,
     stream: true, // Enable streaming for better responsiveness
-    format: 'json',
+    format: is32BModel ? undefined : 'json', // 32B uses tools, don't force JSON format
     options: { temperature: 0.3 },
-    messages: messages
+    messages: messages,
+    ...(tools && { tools }) // Add tools for 32B model
   };
 
   try {
@@ -1415,7 +1760,7 @@ async function planWithLocalOllamaNode(prompt, model = null, options = {}) {
 
 
 // --- Tool Planning Helpers (OpenRouter) ---
-async function planWithOpenRouterTools({ prompt, systemPrompt, openrouterKey, model, appId, history }) {
+async function planWithOpenRouterTools({ prompt, systemPrompt, openrouterKey, model, appId, history, onCodeProgress }) {
   const tools = [
     {
       type: 'function',
@@ -1588,6 +1933,15 @@ async function planWithOpenRouterTools({ prompt, systemPrompt, openrouterKey, mo
 
             for (const file of files) {
               diffs.push({ name: file.path, content: file.content || '' });
+
+              // Stream code to editor if callback provided
+              if (onCodeProgress && typeof onCodeProgress === 'function') {
+                onCodeProgress({
+                  file: file.path,
+                  content: file.content || '',
+                  status: 'complete'
+                });
+              }
             }
             summaryParts.push(`Generated ${files.length} files: ${files.map(f => f.path).join(', ')}`);
             toolResult = { success: true, output: `Created ${files.length} files` };

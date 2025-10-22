@@ -693,6 +693,18 @@ export default function App() {
                         ? { ...msg, content: '🤖 ' + accumulatedContent }
                         : msg
                     ));
+                  } else if (data.type === 'code_progress') {
+                    // Code streaming: switch to code view and show file being written
+                    setViewMode('code');
+                    setSelectedFile(data.file);
+                    setFileContent(data.content);
+
+                    // Update streaming message to show which file is being written
+                    setMessages(prev => prev.map(msg =>
+                      msg.id === streamingMessageId
+                        ? { ...msg, content: `✍️ Writing ${data.file}...` }
+                        : msg
+                    ));
                   } else if (data.type === 'complete') {
                     // Remove streaming message and handle result
                     setMessages(prev => prev.filter(msg => msg.id !== streamingMessageId));
