@@ -110,7 +110,7 @@ function CodeEditor({ currentAppId, fileTree }: { currentAppId: string | null, f
   );
 }
 
-function GeneratedPreview({ previewUrl }: { previewUrl?: string }) {
+function GeneratedPreview({ previewUrl, currentAppId }: { previewUrl?: string, currentAppId?: string }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -161,6 +161,59 @@ function GeneratedPreview({ previewUrl }: { previewUrl?: string }) {
       >
         🔗 Open in New Tab
       </button>
+
+      {/* Deploy to Cloudflare Pages */}
+      <button
+        onClick={async () => {
+          if (!previewUrl) return;
+          const proj = window.prompt('Cloudflare Pages project name (letters, numbers, dashes):');
+          if (!proj) return;
+          try {
+            const resp = await fetch('http://localhost:8787/api/deploy/cloudflare-pages', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ appId: currentAppId || undefined, projectName: proj })
+            });
+            const data = await resp.json();
+            if (!resp.ok) throw new Error(data?.error || 'Deploy failed');
+            const url = data?.url || '(no url parsed)';
+            window.alert(`Deployed to Cloudflare Pages:\n${url}`);
+          } catch (e: any) {
+            window.alert(`Deploy error: ${e?.message || e}`);
+          }
+        }}
+        className="absolute top-2 right-40 z-10 bg-sky-700/90 hover:bg-sky-600 text-white px-3 py-1 rounded-md text-xs font-medium border border-sky-500/50 hover:border-sky-400 transition-colors"
+        title="Deploy to Cloudflare Pages (beta)"
+      >
+        ⛅ Deploy (Pages)
+      </button>
+      {/* Deploy to GitHub Pages */}
+      <button
+        onClick={async () => {
+          if (!previewUrl) return;
+          const repoUrl = window.prompt('GitHub repo URL (e.g. git@github.com:owner/repo.git or https://github.com/owner/repo.git):');
+          if (!repoUrl) return;
+          const branch = window.prompt('Branch to deploy to (default: gh-pages):') || 'gh-pages';
+          try {
+            const resp = await fetch('http://localhost:8787/api/deploy/github-pages', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ appId: currentAppId || undefined, repoUrl, branch })
+            });
+            const data = await resp.json();
+            if (!resp.ok) throw new Error(data?.error || 'Deploy failed');
+            const url = data?.url || '(check your repo settings for Pages URL)';
+            window.alert(`Pushed to ${branch}. If Pages is enabled, your site should be at:\n${url}`);
+          } catch (e: any) {
+            window.alert(`Deploy error: ${e?.message || e}`);
+          }
+        }}
+        className="absolute top-2 right-72 z-10 bg-green-700/90 hover:bg-green-600 text-white px-3 py-1 rounded-md text-xs font-medium border border-green-500/50 hover:border-green-400 transition-colors"
+        title="Deploy to GitHub Pages (beta)"
+      >
+        🐙 Deploy (GH Pages)
+      </button>
+
 
       <div className="w-full h-full bg-white text-black rounded-lg shadow-inner">
         <iframe
@@ -458,7 +511,8 @@ export default function App() {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
               files: json.diffs,
-              appName: userMessage.content.substring(0, 50)
+              appName: userMessage.content.substring(0, 50),
+              appId: currentAppId || undefined
             }),
             signal: controller.signal
           });
@@ -671,7 +725,7 @@ export default function App() {
             <div className="p-4 h-full">
               <div className="w-full h-full bg-slate-800/50 rounded-xl border border-slate-700/50 text-slate-200">
                 {viewMode === 'preview' ? (
-                  <GeneratedPreview previewUrl={previewUrl || undefined} />
+                  <GeneratedPreview previewUrl={previewUrl || undefined} currentAppId={currentAppId || undefined} />
                 ) : (
                   <CodeEditor currentAppId={currentAppId} fileTree={fileTree} />
                 )}
