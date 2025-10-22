@@ -166,11 +166,15 @@ function CodeEditor({
 function GeneratedPreview({ previewUrl, currentAppId }: { previewUrl?: string, currentAppId?: string }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [iframeKey, setIframeKey] = useState(0);
 
   useEffect(() => {
     if (previewUrl) {
       setLoading(true);
       setError(null);
+
+      // Force iframe refresh by changing key
+      setIframeKey(prev => prev + 1);
 
       // Give the Elide app a moment to start up
       const timer = setTimeout(() => {
@@ -179,7 +183,7 @@ function GeneratedPreview({ previewUrl, currentAppId }: { previewUrl?: string, c
 
       return () => clearTimeout(timer);
     }
-  }, [previewUrl]);
+  }, [previewUrl, currentAppId]); // Also depend on currentAppId to refresh when app is edited
 
   if (!previewUrl) {
     return (
@@ -307,7 +311,7 @@ function GeneratedPreview({ previewUrl, currentAppId }: { previewUrl?: string, c
 
       <div className="w-full h-full bg-white text-black rounded-lg shadow-inner">
         <iframe
-          key={previewUrl || 'preview'}
+          key={iframeKey}
           src={previewUrl}
           className="w-full h-full border-0 rounded-lg bg-white"
           title="Generated Elide App Preview"

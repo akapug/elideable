@@ -1,5 +1,5 @@
 import http from 'node:http';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { GoogleGenerativeAI } from '@google/generative-ai';
@@ -2347,39 +2347,44 @@ async function startElideApp(appId, appDir) {
     // Try to use Elide CLI first, fallback to Node.js server
     let process;
 
-    // Check if elide command is available
-    const checkElide = spawn('which', ['elide'], { stdio: 'pipe' });
+    // Check for Elide CLI in common locations
+    const elidePaths = [
+      'elide',                    // In PATH
+      '/home/pug/elide/elide',   // User's local install
+      '/usr/local/bin/elide',    // System install
+      '/opt/elide/bin/elide'     // Alternative install
+    ];
 
-    checkElide.on('exit', (code) => {
-      if (code === 0) {
-        // Elide CLI is available
-        console.log(`[elide] Using Elide CLI for app ${appId}`);
-        process = spawn('elide', ['serve', '--port', port.toString()], {
-          cwd: appDir,
-          stdio: ['pipe', 'pipe', 'pipe']
-        });
-      } else {
-        // Fallback to Node.js server
-        console.log(`[elide] Elide CLI not found, using Node.js fallback for app ${appId}`);
-        process = spawn('node', ['-e', createNodeServerScript(appDir, port)], {
-          cwd: appDir,
-          stdio: ['pipe', 'pipe', 'pipe']
-        });
+    let elidePath = null;
+    for (const path of elidePaths) {
+      try {
+        const result = spawnSync(path, ['--version'], { stdio: 'pipe' });
+        if (result.status === 0) {
+          elidePath = path;
+          break;
+        }
+      } catch (e) {
+        // Path doesn't exist, try next
       }
+    }
 
+    if (elidePath) {
+      // Elide CLI is available
+      console.log(`[elide] Using Elide CLI at ${elidePath} for app ${appId}`);
+      process = spawn(elidePath, ['serve', '--port', port.toString()], {
+        cwd: appDir,
+        stdio: ['pipe', 'pipe', 'pipe']
+      });
       setupProcessHandlers(process, appId, port, resolve, reject);
-    });
-
-    checkElide.on('error', () => {
+    } else {
       // Fallback to Node.js server
-      console.log(`[elide] Using Node.js fallback for app ${appId}`);
+      console.log(`[elide] Elide CLI not found, using Node.js fallback for app ${appId}`);
       process = spawn('node', ['-e', createNodeServerScript(appDir, port)], {
         cwd: appDir,
         stdio: ['pipe', 'pipe', 'pipe']
       });
-
       setupProcessHandlers(process, appId, port, resolve, reject);
-    });
+    }
   });
 }
 
