@@ -57,16 +57,53 @@ const server = http.createServer(async (req, res) => {
   }
   if (url.pathname === '/api/ai/plan' && req.method === 'POST') {
     const body = await readJSON(req, res);
-    console.log('[ai] Planning request:', body?.prompt, 'with model:', body?.model, 'mode:', body?.mode || 'edit', 'appId:', body?.appId || '(new app)');
-    try {
-      const result = await generatePlan(body?.prompt || 'Create a simple app', body?.model, { mode: body?.mode || 'edit', appId: body?.appId || null });
-      console.log('[ai] Generated plan:', JSON.stringify(result, null, 2));
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify(result));
-    } catch (error) {
-      console.error('AI Plan error:', error);
-      res.writeHead(500, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: error.message }));
+    const useStreaming = body?.stream === true;
+
+    console.log('[ai] Planning request:', body?.prompt, 'with model:', body?.model, 'mode:', body?.mode || 'edit', 'appId:', body?.appId || '(new app)', 'history:', body?.history?.length || 0, 'messages', 'streaming:', useStreaming);
+
+    if (useStreaming) {
+      // Streaming response for real-time updates
+      res.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive'
+      });
+
+      try {
+        const result = await generatePlan(body?.prompt || 'Create a simple app', body?.model, {
+          mode: body?.mode || 'edit',
+          appId: body?.appId || null,
+          history: body?.history || [],
+          onProgress: (chunk) => {
+            // Send progress updates to client
+            res.write(`data: ${JSON.stringify({ type: 'progress', content: chunk })}\n\n`);
+          }
+        });
+
+        console.log('[ai] Generated plan (streamed)');
+        res.write(`data: ${JSON.stringify({ type: 'complete', result })}\n\n`);
+        res.end();
+      } catch (error) {
+        console.error('AI Plan error:', error);
+        res.write(`data: ${JSON.stringify({ type: 'error', error: error.message })}\n\n`);
+        res.end();
+      }
+    } else {
+      // Non-streaming response (original behavior)
+      try {
+        const result = await generatePlan(body?.prompt || 'Create a simple app', body?.model, {
+          mode: body?.mode || 'edit',
+          appId: body?.appId || null,
+          history: body?.history || []
+        });
+        console.log('[ai] Generated plan:', JSON.stringify(result, null, 2));
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(result));
+      } catch (error) {
+        console.error('AI Plan error:', error);
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: error.message }));
+      }
     }
     return;
   }
@@ -400,84 +437,55 @@ const server = http.createServer(async (req, res) => {
 
 async function generatePlan(prompt, model = null, options = {}) {
   const mode = options?.mode || 'edit'; // 'chat' disables tool-calling and file extraction
-  // Local provider via Elide runtime + Ollama
-  if (PROVIDER === 'local' || (model && model.toLowerCase().includes('gemma'))) {
-    console.log('[ai] Using local provider (Ollama: Gemma)');
+
+  // Determine provider based on model ID (allows dynamic switching without restart)
+  let useProvider = PROVIDER;
+
+  if (model) {
+    // Check model ID pattern to determine provider
+    // IMPORTANT: Check for OpenRouter format (contains '/') FIRST before checking for claude/gemini
+    // This ensures models like 'anthropic/claude-sonnet-4.5' go to OpenRouter, not Anthropic direct
+    if (model.startsWith('ollama:') || model.includes('gemma') || model.includes('qwen') || model.includes('llama')) {
+      // Local Ollama model
+      console.log('[ai] Using local provider (Ollama):', model);
+      return await planWithLocalOllamaNode(prompt, model, options);
+    } else if (model.includes('/') || model.includes(':free')) {
+      // OpenRouter model (e.g., 'anthropic/claude-sonnet-4.5', 'google/gemini-2.5-pro')
+      console.log('[ai] Using OpenRouter provider:', model);
+      useProvider = 'openrouter';
+    } else if (model.includes('claude-')) {
+      // Direct Anthropic API (e.g., 'claude-sonnet-4-20250514')
+      console.log('[ai] Using Anthropic direct provider:', model);
+      useProvider = 'anthropic';
+    } else if (model.includes('gemini-')) {
+      // Direct Google API (e.g., 'gemini-1.5-flash')
+      console.log('[ai] Using Google direct provider:', model);
+      useProvider = 'gemini';
+    }
+  } else if (PROVIDER === 'local') {
+    // No model specified but PROVIDER is local - use default local model
+    console.log('[ai] Using local provider (Ollama) - no model specified');
     return await planWithLocalOllamaNode(prompt, model, options);
   }
+
   if (!genAI && !anthropic && !openrouterKey) {
     // Providerless fallback: synthesize minimal files based on prompt
     return fallbackGeneratePlan(prompt);
   }
 
-  // Determine provider based on model
-  let useProvider = PROVIDER;
-  if (model) {
-    if (model.includes('claude-')) {
-      useProvider = 'anthropic';
-    } else if (model.includes('gemini-')) {
-      useProvider = 'gemini';
-    } else if (model.includes('/') || model.includes(':free')) {
-      useProvider = 'openrouter';
-    }
-
-
+  // Remote models ALWAYS use advanced prompts (local models use simple prompts)
+  // Build context for editing mode
+  let appContext = null;
+  if (options?.appId) {
+    try {
+      appContext = await buildAppContext(options.appId, { maxFiles: 12, maxCharsPerFile: 500 });
+    } catch {}
   }
 
-  const systemPrompt = `You are an expert Elide polyglot app builder. Elide is a high-performance polyglot runtime that supports JavaScript, TypeScript, Python, Kotlin, and Java in the same project.
+  const systemPrompt = buildAdvancedPrompt({ appId: options?.appId, appContext });
+  const userPrompt = buildAdvancedUserPrompt(prompt, options);
 
-Given a user's description, create a detailed plan for building their app using Elide's polyglot capabilities.
-
-ELIDE CAPABILITIES:
-- JavaScript/TypeScript: Frontend components, Node.js-compatible APIs
-- Python: Data processing, ML/AI, scientific computing, text analysis
-- Kotlin: High-performance business logic, type-safe operations
-- Java: Enterprise integrations, complex algorithms
-- Mix languages in the same project for optimal performance
-
-RESPONSE FORMAT - JSON object containing:
-- summary: Brief description highlighting which languages you'll use and why
-- files: Array of files with polyglot code (mix JS/TS/Python/Kotlin as appropriate)
-- technologies: List of Elide-supported technologies
-
-BEST PRACTICES:
-- Use Python for data processing, text analysis, ML tasks
-- Use TypeScript for React components and frontend logic
-- Use Kotlin for performance-critical backend operations
-- Create realistic, working polyglot applications
-- Include proper imports and Elide-compatible code
-
-Example file structure:
-- App.tsx (React frontend)
-- api/processor.py (Python data processing)
-- core/BusinessLogic.kt (Kotlin business rules)
-- utils/helpers.js (JavaScript utilities)`;
-
-  const chatSystemPrompt = `You are an expert Elide polyglot development consultant. Elide is a high-performance polyglot runtime that supports JavaScript, TypeScript, Python, Kotlin, and Java in the same project.
-
-Your role is to discuss, analyze, and provide guidance about app development using Elide's polyglot capabilities. You should:
-
-CHAT MODE BEHAVIOR:
-- Discuss concepts, architecture, and planning
-- Provide technical advice and best practices
-- Answer questions about Elide capabilities
-- Suggest approaches and trade-offs
-- Help refine requirements and ideas
-
-ELIDE EXPERTISE:
-- JavaScript/TypeScript: Frontend components, Node.js-compatible APIs
-- Python: Data processing, ML/AI, scientific computing, text analysis
-- Kotlin: High-performance business logic, type-safe operations
-- Java: Enterprise integrations, complex algorithms
-
-DO NOT generate actual code files or implementation details in chat mode. Instead, focus on:
-- Conceptual discussions
-- Architecture recommendations
-- Technology choices and rationale
-- Planning and requirements gathering
-- Best practices and patterns
-
-Keep responses conversational and focused on guidance rather than implementation.`;
+  const chatSystemPrompt = `You are an expert full-stack web developer. Provide helpful, conversational guidance about web development, architecture, and best practices. Keep responses focused and practical.`;
 
   // Anthropic tool schema for file creation (now declared inside planWithAnthropicTools)
 
@@ -485,36 +493,124 @@ Keep responses conversational and focused on guidance rather than implementation
 
   if (useProvider === 'anthropic' && anthropic) {
     if (mode !== 'chat') {
-      const toolPlan = await planWithAnthropicTools({ prompt, systemPrompt, anthropic, appId: options?.appId || null });
+      const toolPlan = await planWithAnthropicTools({
+        prompt: userPrompt,
+        systemPrompt,
+        anthropic,
+        appId: options?.appId || null,
+        history: options?.history || []
+      });
       return toolPlan;
     } else {
+      // Build messages array with history for chat mode
+      const messages = [];
+
+      // Add chat history if provided
+      if (options?.history && Array.isArray(options.history) && options.history.length > 0) {
+        for (const msg of options.history) {
+          messages.push({
+            role: msg.role,
+            content: msg.content
+          });
+        }
+      }
+
+      // Add current prompt
+      messages.push({ role: 'user', content: prompt });
+
       const response = await anthropic.messages.create({
         model: 'claude-sonnet-4-20250514',
         max_tokens: 2000,
         system: chatSystemPrompt,
-        messages: [
-          { role: 'user', content: prompt }
-        ]
+        messages: messages
       });
       text = (response.content?.find?.(c => c.type === 'text')?.text) || response.content?.[0]?.text || '';
     }
   } else if (useProvider === 'gemini' && genAI) {
     const geminiModel = genAI.getGenerativeModel({ model: model || 'gemini-1.5-flash' });
     const selectedPrompt = mode === 'chat' ? chatSystemPrompt : systemPrompt;
-    const fullPrompt = `${selectedPrompt}\n\nUser request: ${prompt}`;
+    const fullPrompt = `${selectedPrompt}\n\nUser request: ${userPrompt}`;
     const result = await geminiModel.generateContent(fullPrompt);
     const response = await result.response;
     text = response.text();
   } else if (useProvider === 'local') {
     return await planWithLocalOllamaNode(prompt, model, options);
   } else if (useProvider === 'openrouter' && openrouterKey) {
-    if (mode !== 'chat') {
-      // Use OpenRouter with tool-calling (OpenAI format)
-      const toolPlan = await planWithOpenRouterTools({ prompt, systemPrompt, openrouterKey, model, appId: options?.appId || null });
+    // Check if model supports tool calling
+    // Free models and some others don't support tools
+    const freeModels = [
+      'google/gemini-2.0-flash-exp:free',
+      'deepseek/deepseek-chat-v3.1:free',
+      'google/gemini-2.5-flash-image' // Experimental image model
+    ];
+    const isFreeModel = freeModels.some(freeModel => model?.includes(freeModel));
+
+    if (mode !== 'chat' && !isFreeModel) {
+      // Use OpenRouter with tool-calling (OpenAI format) for SOTA models
+      const toolPlan = await planWithOpenRouterTools({
+        prompt: userPrompt,
+        systemPrompt,
+        openrouterKey,
+        model,
+        appId: options?.appId || null,
+        history: options?.history || []
+      });
       return toolPlan;
     } else {
-      // Chat mode - no tools
-      const selectedPrompt = chatSystemPrompt;
+      // Chat mode OR free models (no tool support) - use text-only API
+      // Free models don't support tool calling, so we use chat completions for them
+      let selectedPrompt = mode === 'chat' ? chatSystemPrompt : systemPrompt;
+      let userMessage = mode === 'chat' ? prompt : userPrompt;
+
+      if (isFreeModel && mode !== 'chat') {
+        console.log('[ai] Free model detected in generate mode - using text-only approach (no tool calling)');
+
+        // For free models in generate mode, use a special prompt that asks for code in markdown
+        selectedPrompt = 'You are a helpful AI that generates complete, working web applications.\n\n' +
+          'When the user asks you to create an app, you MUST respond with the complete HTML code wrapped in a markdown code block.\n\n' +
+          'IMPORTANT:\n' +
+          '- Return ONLY the code in a markdown code block (```html ... ```)\n' +
+          '- Include ALL necessary HTML, CSS, and JavaScript in a single file\n' +
+          '- Make it fully functional and self-contained\n' +
+          '- Do NOT explain or describe the code, just return it\n' +
+          '- Do NOT use any external dependencies or libraries unless absolutely necessary\n\n' +
+          'Example response format:\n' +
+          '```html\n' +
+          '<!DOCTYPE html>\n' +
+          '<html>\n' +
+          '<head>\n' +
+          '  <meta charset="UTF-8">\n' +
+          '  <title>App Title</title>\n' +
+          '  <style>\n' +
+          '    /* CSS here */\n' +
+          '  </style>\n' +
+          '</head>\n' +
+          '<body>\n' +
+          '  <!-- HTML here -->\n' +
+          '  <script>\n' +
+          '    // JavaScript here\n' +
+          '  </script>\n' +
+          '</body>\n' +
+          '</html>\n' +
+          '```';
+
+        userMessage = 'Create a complete, working web application: ' + userPrompt + '\n\n' +
+          'Remember: Return ONLY the HTML code in a markdown code block. No explanations, no descriptions, just the code.';
+      }
+
+      // Build messages array with history
+      const messages = [
+        { role: 'system', content: selectedPrompt }
+      ];
+
+      // Add chat history if provided
+      if (options?.history && Array.isArray(options.history) && options.history.length > 0) {
+        messages.push(...options.history);
+      }
+
+      // Add current prompt
+      messages.push({ role: 'user', content: userMessage });
+
       const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
         method: 'POST',
         headers: {
@@ -525,10 +621,7 @@ Keep responses conversational and focused on guidance rather than implementation
         },
         body: JSON.stringify({
           model: model || 'google/gemini-2.0-flash-exp:free',
-          messages: [
-            { role: 'system', content: selectedPrompt },
-            { role: 'user', content: prompt }
-          ],
+          messages: messages,
           max_tokens: 4000,
           temperature: 0.7
         })
@@ -567,7 +660,39 @@ Keep responses conversational and focused on guidance rather than implementation
 
     // Check if response is ONLY markdown code blocks (not JSON structure)
     if (text.includes('```') && !text.includes('```json') && !text.includes('"files"') && !text.includes('"name"')) {
-      console.log('Response contains only code blocks, no JSON structure, treating as plain text');
+      // For chat mode, return as plain text
+      if (mode === 'chat') {
+        console.log('Response contains only code blocks, no JSON structure, treating as plain text');
+        return { plan: { message: text, prompt }, diffs: [] };
+      }
+
+      // For generate mode (free models), try to extract code from markdown blocks
+      console.log('Response contains code blocks - attempting to extract for deployment');
+      const codeBlockPattern = /```(?:html|javascript|js|css)?\s*([\s\S]*?)```/g;
+      const codeBlocks = [];
+      let match;
+
+      while ((match = codeBlockPattern.exec(text)) !== null) {
+        codeBlocks.push(match[1].trim());
+      }
+
+      if (codeBlocks.length > 0) {
+        console.log(`Extracted ${codeBlocks.length} code block(s) from response`);
+        const htmlContent = codeBlocks[0];
+
+        return {
+          plan: {
+            message: 'Generated app from free model response',
+            prompt
+          },
+          diffs: [
+            { name: 'index.html', content: htmlContent }
+          ]
+        };
+      }
+
+      // If no code blocks found, return as plain text
+      console.log('No code blocks found, returning text response');
       return { plan: { message: text, prompt }, diffs: [] };
     }
 
@@ -672,7 +797,43 @@ Keep responses conversational and focused on guidance rather than implementation
       diffs: diffs
     };
   } catch (e) {
-    console.warn('JSON parse error:', e.message);
+    // In chat mode, text-only responses are expected, so don't log as error
+    if (mode === 'chat') {
+      console.log('[ai] Chat mode: returning text response (no JSON structure)');
+      return { plan: { message: text, prompt }, diffs: [] };
+    }
+
+    // For free models in generate mode, try to extract code from markdown blocks
+    console.warn('[ai] JSON parse error in generate mode:', e.message);
+    console.log('[ai] Attempting to extract code from markdown blocks...');
+
+    // Try to extract HTML/code from markdown code blocks
+    const codeBlockPattern = /```(?:html|javascript|js|css)?\s*([\s\S]*?)```/g;
+    const codeBlocks = [];
+    let match;
+
+    while ((match = codeBlockPattern.exec(text)) !== null) {
+      codeBlocks.push(match[1].trim());
+    }
+
+    if (codeBlocks.length > 0) {
+      // If we found code blocks, use the first one as index.html
+      console.log(`[ai] Extracted ${codeBlocks.length} code block(s) from response`);
+      const htmlContent = codeBlocks[0];
+
+      return {
+        plan: {
+          message: 'Generated app from free model response (extracted from markdown)',
+          prompt
+        },
+        diffs: [
+          { name: 'index.html', content: htmlContent }
+        ]
+      };
+    }
+
+    // If no code blocks found, return text as-is
+    console.log('[ai] No code blocks found, returning text response');
     return { plan: { message: text, prompt }, diffs: [] };
   }
 }
@@ -693,11 +854,11 @@ function fallbackGeneratePlan(prompt) {
 
 
 // --- Tool Planning Helpers (Anthropic) ---
-async function planWithAnthropicTools({ prompt, systemPrompt, anthropic, appId }) {
+async function planWithAnthropicTools({ prompt, systemPrompt, anthropic, appId, history }) {
   const tools = [
     {
       name: 'write_files',
-      description: 'Create or overwrite application files with complete content. This tool should be used whenever you need to generate actual file contents for the user\'s app. You must provide the complete file content, not just snippets. Use this for creating HTML, CSS, JavaScript, Python, or any other files. The files will be written to the app directory and served to the user.',
+      description: 'Create NEW files or COMPLETELY REWRITE existing files. Use this ONLY when creating new files or when you need to replace the entire file content. For small edits to existing files, use str_replace instead.',
       input_schema: {
         type: 'object',
         properties: {
@@ -715,16 +876,74 @@ async function planWithAnthropicTools({ prompt, systemPrompt, anthropic, appId }
         },
         required: ['files']
       }
+    },
+    {
+      name: 'str_replace',
+      description: 'Make targeted edits to existing files by replacing specific strings. Use this for small, precise changes (< 50 lines). The old_str must match EXACTLY including all whitespace, indentation, and line breaks. If you\'re unsure of the exact formatting, use read_file first to see the current content.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: 'File path relative to app root' },
+          old_str: { type: 'string', description: 'Exact string to find and replace. Must match exactly including whitespace.' },
+          new_str: { type: 'string', description: 'Replacement string' }
+        },
+        required: ['path', 'old_str', 'new_str']
+      }
+    },
+    {
+      name: 'apply_diff',
+      description: 'Apply a unified diff patch to a file. Use this for multiple changes in one file or when str_replace would be too fragile. The diff should be in standard unified diff format.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: 'File path relative to app root' },
+          diff: { type: 'string', description: 'Unified diff format patch (output of diff -u)' }
+        },
+        required: ['path', 'diff']
+      }
+    },
+    {
+      name: 'read_file',
+      description: 'Read the current content of a file. Use this before making edits to see the exact formatting and content.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: 'File path relative to app root' }
+        },
+        required: ['path']
+      }
     }
   ];
 
   console.log('[ai] Sending request to Anthropic with tools:', tools.map(t => t.name));
+
+  // Build messages array with history
+  const messages = [];
+
+  // Add chat history if provided (convert to Anthropic format)
+  if (history && Array.isArray(history) && history.length > 0) {
+    for (const msg of history) {
+      messages.push({
+        role: msg.role,
+        content: [{ type: 'text', text: msg.content }]
+      });
+    }
+  }
+
+  // Add current prompt
+  messages.push({
+    role: 'user',
+    content: appId
+      ? [{ type: 'text', text: prompt }, { type: 'text', text: `Active app id: ${appId}` }]
+      : [{ type: 'text', text: prompt + '\n\nPlease use the write_files tool to create the actual files.' }]
+  });
+
   const stream = await anthropic.messages.create({
     model: 'claude-sonnet-4-20250514', max_tokens: 64000,
     system: systemPrompt + '\n\nCRITICAL: You MUST use the write_files tool to create actual files. Never just describe or explain what files you would create. Always immediately call write_files with complete, working file contents. The user expects actual files to be generated.',
     tools, tool_choice: { type: 'any' },
     stream: true,
-    messages: [{ role: 'user', content: appId ? [{ type: 'text', text: prompt }, { type: 'text', text: `Active app id: ${appId}` }] : [{ type: 'text', text: prompt + '\n\nPlease use the write_files tool to create the actual files.' }] }]
+    messages: messages
   });
 
   // Collect the streaming response
@@ -845,6 +1064,80 @@ async function planWithLocalElide(prompt, model = null, options = {}) {
         const content = await readFileForApp(input.path);
         summaryParts.push(`Read ${input.path} (${content.length} bytes)`);
       }
+      if (block.name === 'str_replace') {
+        console.log('[ai] Processing str_replace tool call for:', input.path);
+        const content = await readFileForApp(input.path);
+        if (!content) {
+          console.error('[ai] str_replace failed: file not found:', input.path);
+          summaryParts.push(`Error: File ${input.path} not found`);
+        } else {
+          const oldStr = input.old_str;
+          const newStr = input.new_str;
+
+          if (!content.includes(oldStr)) {
+            console.error('[ai] str_replace failed: old_str not found in file');
+            console.error('[ai] Looking for:', oldStr.substring(0, 100));
+            summaryParts.push(`Error: String not found in ${input.path}`);
+          } else {
+            const replaced = content.replace(oldStr, newStr);
+            diffs.push({ name: input.path, content: replaced });
+            console.log('[ai] str_replace successful for:', input.path);
+            summaryParts.push(`Edited ${input.path} with str_replace`);
+          }
+        }
+      }
+      if (block.name === 'apply_diff') {
+        console.log('[ai] Processing apply_diff tool call for:', input.path);
+        const content = await readFileForApp(input.path);
+        if (!content) {
+          console.error('[ai] apply_diff failed: file not found:', input.path);
+          summaryParts.push(`Error: File ${input.path} not found`);
+        } else {
+          try {
+            // Simple unified diff parser
+            const diffLines = input.diff.split('\\n');
+            const lines = content.split('\\n');
+            let result = [];
+            let lineIdx = 0;
+
+            for (const diffLine of diffLines) {
+              if (diffLine.startsWith('@@')) {
+                // Parse hunk header: @@ -start,count +start,count @@
+                const match = diffLine.match(/@@ -(\d+),?(\d*) \+(\d+),?(\d*) @@/);
+                if (match) {
+                  const oldStart = parseInt(match[1]) - 1; // Convert to 0-based
+                  lineIdx = oldStart;
+                }
+              } else if (diffLine.startsWith('-')) {
+                // Remove line
+                lineIdx++;
+              } else if (diffLine.startsWith('+')) {
+                // Add line
+                result.push(diffLine.substring(1));
+              } else if (diffLine.startsWith(' ')) {
+                // Context line - keep it
+                if (lineIdx < lines.length) {
+                  result.push(lines[lineIdx]);
+                  lineIdx++;
+                }
+              }
+            }
+
+            // Add remaining lines
+            while (lineIdx < lines.length) {
+              result.push(lines[lineIdx]);
+              lineIdx++;
+            }
+
+            diffs.push({ name: input.path, content: result.join('\\n') });
+            console.log('[ai] apply_diff successful for:', input.path);
+            summaryParts.push(`Applied diff to ${input.path}`);
+          } catch (e) {
+            console.error('[ai] apply_diff failed:', e.message);
+            summaryParts.push(`Error applying diff to ${input.path}: ${e.message}`);
+          }
+        }
+      }
       if (block.name === 'replace_in_file') {
         const content = await readFileForApp(input.path);
         if (content) {
@@ -926,10 +1219,19 @@ async function planWithLocalElide(prompt, model = null, options = {}) {
   });
 }
 
-// Local provider via direct Node fetch to Ollama (v2.0 with improved prompting)
+// Local provider via direct Node fetch to Ollama (v3.0 with streaming and 2-minute timeout)
 async function planWithLocalOllamaNode(prompt, model = null, options = {}) {
   const baseUrl = process.env.OLLAMA_BASE_URL || 'http://127.0.0.1:11434';
-  const mdl = (process.env.OLLAMA_MODEL && process.env.OLLAMA_MODEL.trim()) ? process.env.OLLAMA_MODEL : (model || 'gemma2:2b-instruct-q8_0');
+
+  // Strip 'ollama:' prefix if present
+  let modelName = model;
+  if (modelName && modelName.startsWith('ollama:')) {
+    modelName = modelName.substring(7); // Remove 'ollama:' prefix
+  }
+
+  const mdl = (process.env.OLLAMA_MODEL && process.env.OLLAMA_MODEL.trim()) ? process.env.OLLAMA_MODEL : (modelName || 'gemma2:2b-instruct-q8_0');
+
+  console.log('[ai] Ollama model name after stripping prefix:', mdl);
 
   // Build context for editing mode
   let appContext = null;
@@ -939,42 +1241,144 @@ async function planWithLocalOllamaNode(prompt, model = null, options = {}) {
     } catch {}
   }
 
-  // Choose prompt based on model size
-  // Small models (< 3B params): simple, concrete prompts
-  // Large models (7B+ params): advanced, detailed prompts
-  const isLargeModel = mdl.includes('7b') || mdl.includes('14b') || mdl.includes('32b') || mdl.includes('coder');
-  const buildSystemPrompt = isLargeModel ? buildAdvancedPrompt : buildSimplePrompt;
-  const buildUserPrompt = isLargeModel ? buildAdvancedUserPrompt : buildSimpleUserPrompt;
+  // Local models ALWAYS use simple prompts (remote models use advanced prompts)
+  const systemPrompt = buildSimplePrompt({ appId: options?.appId, appContext });
+  const userPrompt = buildSimpleUserPrompt(prompt, options);
 
-  const systemPrompt = buildSystemPrompt({ appId: options?.appId, appContext });
-  const userPrompt = buildUserPrompt(prompt, options);
+  // Build messages array with history
+  const messages = [
+    { role: 'system', content: systemPrompt }
+  ];
+
+  // Add chat history if provided
+  if (options?.history && Array.isArray(options.history) && options.history.length > 0) {
+    messages.push(...options.history);
+  }
+
+  // Add current prompt
+  messages.push({ role: 'user', content: userPrompt });
 
   const body = {
     model: mdl,
-    stream: false,
+    stream: true, // Enable streaming for better responsiveness
     format: 'json',
     options: { temperature: 0.3 },
-    messages: [
-      { role: 'system', content: systemPrompt },
-      { role: 'user', content: userPrompt }
-    ]
+    messages: messages
   };
 
   try {
-    const res = await fetch(`${baseUrl}/api/chat`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-    if (!res.ok) throw new Error(`Ollama HTTP ${res.status}`);
-    const data = await res.json();
-    const content = data?.message?.content || '';
+    // Determine timeout based on model size
+    // 32B models need more time to load and generate
+    const is32BModel = mdl.includes('32b');
+    const timeoutMs = is32BModel ? 300000 : 120000; // 5 minutes for 32B, 2 minutes for others
+
+    console.log(`[ai] Starting Ollama request for model: ${mdl} (timeout: ${timeoutMs/1000}s)`);
+    const startTime = Date.now();
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+    console.log('[ai] Sending fetch request to Ollama...');
+    const fetchStartTime = Date.now();
+
+    const res = await fetch(`${baseUrl}/api/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: controller.signal
+    });
+
+    const fetchDuration = Date.now() - fetchStartTime;
+    console.log(`[ai] Fetch completed in ${fetchDuration}ms, status: ${res.status}`);
+
+    clearTimeout(timeout);
+
+    if (!res.ok) {
+      // Try to get the actual error message from Ollama
+      let errorMessage = `Ollama HTTP ${res.status}`;
+      try {
+        const errorBody = await res.text();
+        const errorJson = JSON.parse(errorBody);
+        if (errorJson.error) {
+          errorMessage = errorJson.error;
+        }
+      } catch (e) {
+        // If we can't parse the error, use the generic message
+      }
+      throw new Error(errorMessage);
+    }
+
+    // Collect streaming response
+    console.log('[ai] Starting to read streaming response...');
+    let fullContent = '';
+    let firstChunkTime = null;
+    let chunkCount = 0;
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      if (!firstChunkTime) {
+        firstChunkTime = Date.now();
+        const timeToFirstChunk = firstChunkTime - startTime;
+        console.log(`[ai] First chunk received after ${timeToFirstChunk}ms (model load + generation start)`);
+      }
+
+      chunkCount++;
+
+      const chunk = decoder.decode(value, { stream: true });
+      const lines = chunk.split('\n').filter(line => line.trim());
+
+      for (const line of lines) {
+        try {
+          const json = JSON.parse(line);
+          if (json.message?.content) {
+            const content = json.message.content;
+            fullContent += content;
+
+            // Call progress callback if provided
+            if (options?.onProgress && typeof options.onProgress === 'function') {
+              if (chunkCount % 10 === 0) { // Log every 10th chunk to avoid spam
+                console.log(`[ai] Chunk ${chunkCount}: Calling onProgress with ${content.length} chars`);
+              }
+              options.onProgress(content);
+            }
+          }
+        } catch (e) {
+          // Skip invalid JSON lines
+          if (chunkCount <= 5) { // Only log parse errors for first few chunks
+            console.log(`[ai] Skipping invalid JSON line in chunk ${chunkCount}`);
+          }
+        }
+      }
+    }
+
+    const totalDuration = Date.now() - startTime;
+    console.log(`[ai] Streaming complete! Total: ${totalDuration}ms, Chunks: ${chunkCount}, Content length: ${fullContent.length} chars`);
+    console.log(`[ai] Raw content preview (first 500 chars): ${fullContent.substring(0, 500)}`);
+
     let parsed = null;
-    try { parsed = JSON.parse(String(content).trim()); } catch {}
+    let parseError = null;
+    try {
+      parsed = JSON.parse(fullContent.trim());
+      console.log('[ai] Successfully parsed JSON response');
+    } catch (e) {
+      parseError = e.message;
+      console.log('[ai] JSON parse failed:', e.message);
+    }
 
     // Tolerant fallback: if not strict JSON, accept raw HTML or heuristically mirror the prompt
     if (!parsed || !Array.isArray(parsed.diffs) || parsed.diffs.length === 0) {
+      console.log('[ai] No valid diffs in parsed JSON, trying fallback extraction...');
       // Try to extract full HTML from the model output
-      const htmlMatch = String(content).match(/<html[\s\S]*<\/html>/i) || String(content).match(/<!doctype html[\s\S]*<\/html>/i);
+      const htmlMatch = fullContent.match(/<html[\s\S]*<\/html>/i) || fullContent.match(/<!doctype html[\s\S]*<\/html>/i);
       if (htmlMatch) {
+        console.log('[ai] Extracted HTML from model output');
         parsed = { plan: { message: 'Generated HTML from model output.', prompt }, diffs: [ { name: 'index.html', content: htmlMatch[0] } ] };
       } else {
+        console.log('[ai] No HTML found, using heuristic fallback');
         // Heuristic: allow `h1: ...` hint in prompt to define the heading
         const h1Match = String(prompt || '').match(/h1:\s*([^\n]+)/i);
         const h1 = (h1Match && h1Match[1] && h1Match[1].trim()) ? h1Match[1].trim() : 'Hello from Qwen!';
@@ -984,24 +1388,40 @@ async function planWithLocalOllamaNode(prompt, model = null, options = {}) {
         };
       }
     } else {
+      console.log(`[ai] Valid JSON with ${parsed.diffs.length} diffs`);
       parsed.plan = parsed.plan || { message: 'Generated plan', prompt };
     }
+
+    console.log('[ai] Returning parsed result to client');
     return parsed;
   } catch (e) {
-    console.warn('[ai] local ollama error:', e?.message || e);
-    return fallbackGeneratePlan(prompt);
+    if (e.name === 'AbortError') {
+      const is32BModel = mdl.includes('32b');
+      const timeoutMinutes = is32BModel ? 5 : 2;
+      console.warn(`[ai] local ollama timeout after ${timeoutMinutes} minutes`);
+      throw new Error(`Local model timed out after ${timeoutMinutes} minutes. Try a smaller model or simpler prompt.`);
+    } else {
+      console.warn('[ai] local ollama error:', e?.message || e);
+
+      // Check if it's a memory error
+      if (e?.message?.includes('requires more system memory')) {
+        throw new Error(`❌ Not enough RAM: ${e.message}\n\nTry using the 7B model instead, or close other applications to free up memory.`);
+      }
+
+      throw new Error(`Local model error: ${e?.message || e}`);
+    }
   }
 }
 
 
 // --- Tool Planning Helpers (OpenRouter) ---
-async function planWithOpenRouterTools({ prompt, systemPrompt, openrouterKey, model, appId }) {
+async function planWithOpenRouterTools({ prompt, systemPrompt, openrouterKey, model, appId, history }) {
   const tools = [
     {
       type: 'function',
       function: {
         name: 'write_files',
-        description: 'Create or overwrite application files with complete content. This tool should be used whenever you need to generate actual file contents for the user\'s app. You must provide the complete file content, not just snippets. Use this for creating HTML, CSS, JavaScript, Python, or any other files. The files will be written to the app directory and served to the user.',
+        description: 'Create NEW files or COMPLETELY REWRITE existing files. Use this ONLY when creating new files or when you need to replace the entire file content. For small edits to existing files, use str_replace instead.',
         parameters: {
           type: 'object',
           properties: {
@@ -1020,6 +1440,51 @@ async function planWithOpenRouterTools({ prompt, systemPrompt, openrouterKey, mo
           required: ['files']
         }
       }
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'str_replace',
+        description: 'Make targeted edits to existing files by replacing specific strings. Use this for small, precise changes (< 50 lines). The old_str must match EXACTLY including all whitespace, indentation, and line breaks.',
+        parameters: {
+          type: 'object',
+          properties: {
+            path: { type: 'string', description: 'File path relative to app root' },
+            old_str: { type: 'string', description: 'Exact string to find and replace. Must match exactly including whitespace.' },
+            new_str: { type: 'string', description: 'Replacement string' }
+          },
+          required: ['path', 'old_str', 'new_str']
+        }
+      }
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'apply_diff',
+        description: 'Apply a unified diff patch to a file. Use this for multiple changes in one file or when str_replace would be too fragile.',
+        parameters: {
+          type: 'object',
+          properties: {
+            path: { type: 'string', description: 'File path relative to app root' },
+            diff: { type: 'string', description: 'Unified diff format patch' }
+          },
+          required: ['path', 'diff']
+        }
+      }
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'read_file',
+        description: 'Read the current content of a file. Use this before making edits to see the exact formatting.',
+        parameters: {
+          type: 'object',
+          properties: {
+            path: { type: 'string', description: 'File path relative to app root' }
+          },
+          required: ['path']
+        }
+      }
     }
   ];
 
@@ -1027,15 +1492,25 @@ async function planWithOpenRouterTools({ prompt, systemPrompt, openrouterKey, mo
   console.log('[ai] OpenRouter API key present:', !!openrouterKey);
   console.log('[ai] OpenRouter API key length:', openrouterKey?.length || 0);
 
+  // Build messages array with history
+  const messages = [
+    { role: 'system', content: systemPrompt }
+  ];
+
+  // Add chat history if provided
+  if (history && Array.isArray(history) && history.length > 0) {
+    messages.push(...history);
+  }
+
+  // Add current prompt
+  messages.push({ role: 'user', content: prompt });
+
   const requestBody = {
     model: model || 'google/gemini-2.0-flash-exp:free',
-    messages: [
-      { role: 'system', content: systemPrompt },
-      { role: 'user', content: prompt }
-    ],
+    messages: messages,
     tools: tools,
     tool_choice: 'auto',
-    max_tokens: 4000,
+    max_tokens: 16000, // Increased from 4000 to prevent truncation of tool call arguments
     temperature: 0.7
   };
 
@@ -1063,6 +1538,7 @@ async function planWithOpenRouterTools({ prompt, systemPrompt, openrouterKey, mo
 
   const data = await response.json();
   console.log('[ai] OpenRouter tool-calling response received');
+  console.log('[ai] OpenRouter response data:', JSON.stringify(data, null, 2));
 
   if (!data.choices || !data.choices[0] || !data.choices[0].message) {
     console.error('[ai] Invalid OpenRouter response structure:', data);
@@ -1070,14 +1546,31 @@ async function planWithOpenRouterTools({ prompt, systemPrompt, openrouterKey, mo
   }
 
   const message = data.choices[0].message;
+  console.log('[ai] OpenRouter message:', JSON.stringify(message, null, 2));
   const summaryParts = [];
   const diffs = [];
 
+  // Helper to read file for app
+  async function readFileForApp(p) {
+    if (!appId) return '';
+    try {
+      const appDir = path.join(GENERATED_APPS_DIR, appId);
+      const full = path.join(appDir, p);
+      return await fs.readFile(full, 'utf8');
+    } catch {
+      return '';
+    }
+  }
+
   // Handle tool calls (OpenAI format)
   if (message.tool_calls && message.tool_calls.length > 0) {
+    console.log(`[ai] OpenRouter returned ${message.tool_calls.length} tool calls`);
     for (const toolCall of message.tool_calls) {
+      console.log(`[ai] Tool call:`, JSON.stringify(toolCall, null, 2));
+
       if (toolCall.function.name === 'write_files') {
         try {
+          console.log(`[ai] Tool call arguments (raw):`, toolCall.function.arguments);
           const args = JSON.parse(toolCall.function.arguments);
           const files = args.files || [];
           console.log(`[ai] OpenRouter tool call: write_files with ${files.length} files`);
@@ -1088,9 +1581,100 @@ async function planWithOpenRouterTools({ prompt, systemPrompt, openrouterKey, mo
           summaryParts.push(`Generated ${files.length} files: ${files.map(f => f.path).join(', ')}`);
         } catch (e) {
           console.error('[ai] Failed to parse OpenRouter tool call arguments:', e.message);
+          console.error('[ai] Raw arguments:', toolCall.function.arguments);
+        }
+      }
+
+      if (toolCall.function.name === 'str_replace') {
+        try {
+          const args = JSON.parse(toolCall.function.arguments);
+          console.log('[ai] OpenRouter tool call: str_replace for', args.path);
+
+          const content = await readFileForApp(args.path);
+          if (!content) {
+            console.error('[ai] str_replace failed: file not found:', args.path);
+            summaryParts.push(`Error: File ${args.path} not found`);
+          } else {
+            const oldStr = args.old_str;
+            const newStr = args.new_str;
+
+            if (!content.includes(oldStr)) {
+              console.error('[ai] str_replace failed: old_str not found in file');
+              summaryParts.push(`Error: String not found in ${args.path}`);
+            } else {
+              const replaced = content.replace(oldStr, newStr);
+              diffs.push({ name: args.path, content: replaced });
+              console.log('[ai] str_replace successful for:', args.path);
+              summaryParts.push(`Edited ${args.path} with str_replace`);
+            }
+          }
+        } catch (e) {
+          console.error('[ai] Failed to process str_replace:', e.message);
+        }
+      }
+
+      if (toolCall.function.name === 'apply_diff') {
+        try {
+          const args = JSON.parse(toolCall.function.arguments);
+          console.log('[ai] OpenRouter tool call: apply_diff for', args.path);
+
+          const content = await readFileForApp(args.path);
+          if (!content) {
+            console.error('[ai] apply_diff failed: file not found:', args.path);
+            summaryParts.push(`Error: File ${args.path} not found`);
+          } else {
+            // Simple unified diff parser
+            const diffLines = args.diff.split('\n');
+            const lines = content.split('\n');
+            let result = [];
+            let lineIdx = 0;
+
+            for (const diffLine of diffLines) {
+              if (diffLine.startsWith('@@')) {
+                const match = diffLine.match(/@@ -(\d+),?(\d*) \+(\d+),?(\d*) @@/);
+                if (match) {
+                  const oldStart = parseInt(match[1]) - 1;
+                  lineIdx = oldStart;
+                }
+              } else if (diffLine.startsWith('-')) {
+                lineIdx++;
+              } else if (diffLine.startsWith('+')) {
+                result.push(diffLine.substring(1));
+              } else if (diffLine.startsWith(' ')) {
+                if (lineIdx < lines.length) {
+                  result.push(lines[lineIdx]);
+                  lineIdx++;
+                }
+              }
+            }
+
+            while (lineIdx < lines.length) {
+              result.push(lines[lineIdx]);
+              lineIdx++;
+            }
+
+            diffs.push({ name: args.path, content: result.join('\n') });
+            console.log('[ai] apply_diff successful for:', args.path);
+            summaryParts.push(`Applied diff to ${args.path}`);
+          }
+        } catch (e) {
+          console.error('[ai] Failed to process apply_diff:', e.message);
+          summaryParts.push(`Error applying diff: ${e.message}`);
+        }
+      }
+
+      if (toolCall.function.name === 'read_file') {
+        try {
+          const args = JSON.parse(toolCall.function.arguments);
+          const content = await readFileForApp(args.path);
+          summaryParts.push(`Read ${args.path} (${content.length} bytes)`);
+        } catch (e) {
+          console.error('[ai] Failed to process read_file:', e.message);
         }
       }
     }
+  } else {
+    console.log('[ai] No tool calls in OpenRouter response');
   }
 
   // If no tool calls, try to parse content as JSON (fallback)
@@ -1423,7 +2007,11 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  if (req.url === '/') {
+  // Parse URL to get pathname without query parameters
+  const url = new URL(req.url, 'http://localhost');
+  const pathname = url.pathname;
+
+  if (pathname === '/') {
     // If index.html exists in the app dir, serve it
     try {
       const indexPath = path.join(APP_DIR, 'index.html');
@@ -1484,7 +2072,7 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  if (req.url === '/api/polyglot/greeting') {
+  if (pathname === '/api/polyglot/greeting') {
     try {
       // Simulate polyglot execution
       const baseGreeting = await mockPolyglotFunctions.generateGreeting();
@@ -1506,7 +2094,7 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  if (req.url === '/api/files') {
+  if (pathname === '/api/files') {
     const files = [];
     try {
       const entries = fs.readdirSync(APP_DIR);
@@ -1526,6 +2114,45 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(files));
     return;
+  }
+
+  // Serve static files (CSS, JS, images, etc.)
+  try {
+    const filePath = path.join(APP_DIR, pathname);
+
+    // Security: prevent directory traversal
+    if (!filePath.startsWith(APP_DIR)) {
+      res.writeHead(403);
+      res.end('Forbidden');
+      return;
+    }
+
+    if (fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
+      const ext = path.extname(filePath).toLowerCase();
+      const contentTypes = {
+        '.html': 'text/html',
+        '.css': 'text/css',
+        '.js': 'application/javascript',
+        '.json': 'application/json',
+        '.png': 'image/png',
+        '.jpg': 'image/jpeg',
+        '.jpeg': 'image/jpeg',
+        '.gif': 'image/gif',
+        '.svg': 'image/svg+xml',
+        '.ico': 'image/x-icon',
+        '.txt': 'text/plain',
+        '.md': 'text/markdown'
+      };
+
+      const contentType = contentTypes[ext] || 'application/octet-stream';
+      const content = fs.readFileSync(filePath);
+
+      res.writeHead(200, { 'Content-Type': contentType });
+      res.end(content);
+      return;
+    }
+  } catch (err) {
+    console.error('Error serving static file:', err);
   }
 
   res.writeHead(404);
@@ -1596,6 +2223,40 @@ function setupProcessHandlers(process, appId, port, resolve, reject) {
     reject(err);
   });
 }
+async function killProcessOnPort(port) {
+  return new Promise((resolve) => {
+    // Use lsof to find process on port, then kill -9 it
+    const lsof = spawn('lsof', ['-ti', `:${port}`], { stdio: 'pipe' });
+    let pid = '';
+
+    lsof.stdout.on('data', (data) => {
+      pid += data.toString();
+    });
+
+    lsof.on('close', (code) => {
+      if (pid.trim()) {
+        const pids = pid.trim().split('\n');
+        console.log(`[elide] Found ${pids.length} process(es) on port ${port}, killing...`);
+        for (const p of pids) {
+          try {
+            process.kill(parseInt(p.trim()), 'SIGKILL');
+            console.log(`[elide] Killed process ${p} on port ${port}`);
+          } catch (e) {
+            console.log(`[elide] Failed to kill process ${p}:`, e.message);
+          }
+        }
+      }
+      // Wait a bit for port to be freed
+      setTimeout(resolve, 100);
+    });
+
+    lsof.on('error', () => {
+      // lsof not available or failed, just resolve
+      resolve();
+    });
+  });
+}
+
 async function stopAllElideApps() {
   for (const [id, app] of runningApps.entries()) {
     try {
@@ -1605,6 +2266,9 @@ async function stopAllElideApps() {
     runningApps.delete(id);
   }
   nextPort = PREVIEW_PORT;
+
+  // Force-kill any remaining process on the preview port
+  await killProcessOnPort(PREVIEW_PORT);
 }
 
 

@@ -27,9 +27,63 @@ You create complete, working web applications using:
 - **JavaScript**: ES6+, DOM manipulation, async/await, fetch API
 - **Best Practices**: Progressive enhancement, mobile-first, performance optimization
 
-## Output Format
+## Tool Usage Guidelines
 
-Return ONLY valid JSON matching this exact schema:
+You have access to these tools for file operations:
+
+### 1. **write_files** - Create new files or completely rewrite existing ones
+**When to use:**
+- Creating new files from scratch
+- Complete file rewrites (rare - only when >80% of file changes)
+
+**When NOT to use:**
+- Making small edits to existing files (use str_replace instead)
+- Changing a few lines (use str_replace instead)
+
+### 2. **str_replace** - Make targeted edits to existing files
+**When to use:**
+- Small, precise changes (< 50 lines)
+- Fixing bugs, updating specific functions
+- Changing specific text, values, or code blocks
+
+**Requirements:**
+- \`old_str\` must match EXACTLY (including whitespace, indentation, line breaks)
+- If unsure of exact formatting, use \`read_file\` first
+- Only replaces the FIRST occurrence (use multiple calls for multiple changes)
+
+**Example:**
+\`\`\`javascript
+// To change a button color from blue to green:
+str_replace({
+  path: "styles.css",
+  old_str: "  background: #0077ff;",
+  new_str: "  background: #00ff77;"
+})
+\`\`\`
+
+### 3. **apply_diff** - Apply unified diff patches
+**When to use:**
+- Multiple related changes in one file
+- When str_replace would be too fragile
+- Complex refactoring within a single file
+
+**Format:** Standard unified diff format (output of \`diff -u\`)
+
+### 4. **read_file** - Read current file content
+**When to use:**
+- Before making edits to see exact formatting
+- To understand current state before changes
+- When you need to reference existing code
+
+**Best Practices:**
+1. **Prefer editing over rewriting**: Use \`str_replace\` for small changes
+2. **Read before editing**: Use \`read_file\` if unsure of exact content
+3. **One tool per file**: Don't mix \`write_files\` and \`str_replace\` for same file
+4. **Preserve context**: Editing maintains surrounding code, comments, formatting
+
+## Output Format (Legacy JSON Mode)
+
+When NOT using tools, return ONLY valid JSON matching this exact schema:
 
 \`\`\`json
 {
@@ -197,6 +251,13 @@ Now create the application.`;
 }
 
 export function buildUserPrompt(prompt, options = {}) {
+  const { appId, mode } = options;
+
+  // If we have an appId and we're in edit mode, emphasize editing
+  if (appId && mode === 'edit') {
+    return `EDIT THE EXISTING APP: ${prompt}\n\nIMPORTANT: You are modifying an existing application. Only include files that need to be changed or added. Do not regenerate the entire app from scratch.`;
+  }
+
   return String(prompt || 'Create a simple web application');
 }
 
