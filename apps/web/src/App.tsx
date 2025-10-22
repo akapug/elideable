@@ -253,7 +253,7 @@ interface Message {
   timestamp: Date;
 }
 
-function Pane({ title, children }: { title: string; children?: React.ReactNode }) {
+function Pane({ title, children }: { title: React.ReactNode; children?: React.ReactNode }) {
   return (
     <div className="flex flex-col h-full border border-slate-700/50 rounded-lg overflow-hidden bg-slate-900/50 backdrop-blur-sm resize">
       <div className="px-4 py-3 text-sm font-medium bg-slate-800/80 border-b border-slate-700/50 text-slate-200 cursor-move">
@@ -323,6 +323,34 @@ export default function App() {
   const [currentAppId, setCurrentAppId] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<'preview' | 'code'>('preview');
   const [backendInfo, setBackendInfo] = useState<{provider: string; local: boolean; model?: string} | null>(null);
+  const [showApps, setShowApps] = useState(false);
+  const [appsList, setAppsList] = useState<Array<{appId: string; name: string; updatedAt: number}>>([]);
+
+  async function fetchAppsList() {
+    try {
+      const r = await fetch('http://localhost:8787/api/apps');
+      const j = await r.json();
+      setAppsList(j.apps || []);
+    } catch {}
+  }
+
+  async function openApp(appId: string) {
+    try {
+      const r = await fetch('http://localhost:8787/api/preview/start', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ appId })
+      });
+      const j = await r.json();
+      if (j?.url) {
+        setCurrentAppId(appId);
+        setPreviewUrl(j.url);
+        await refreshTree();
+        setShowApps(false);
+      }
+    } catch (e) { console.error(e); }
+  }
+
 
   const models = [
     // A synthetic local entry will be shown when backendInfo.local is true
@@ -604,7 +632,18 @@ export default function App() {
     <div className="h-screen w-screen bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950 text-slate-100">
       <div className="grid grid-cols-12 gap-4 p-4 h-full">
         <div className="col-span-4">
-          <Pane title="Chat">
+          <Pane title={(
+            <div className="flex items-center justify-between">
+              <span>Chat</span>
+              <button
+                onClick={async () => { setShowApps(true); try { await fetchAppsList(); } catch {} }}
+                className="px-2 py-1 text-xs rounded bg-slate-700 hover:bg-slate-600"
+                title="Open local apps dashboard"
+              >
+                Apps
+              </button>
+            </div>
+          )}>
             <div className="flex flex-col h-full">
               <div className="flex-1 overflow-y-auto p-4 space-y-1 max-h-[calc(100vh-300px)]">
                 {messages.map(message => (
@@ -685,68 +724,67 @@ export default function App() {
                   ) : (
                     <>
                       <button
-                        onClick={() => sendMessage('edit')}
-                        disabled={!input.trim()}
-                        className="px-6 py-3 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 disabled:cursor-not-allowed rounded-xl text-sm font-medium transition-colors"
+                        onClick={() => sendMessage()}
+                        className="px-6 py-3 bg-blue-600 hover:bg-blue-500 rounded-xl text-sm font-medium transition-colors"
+                        title="Generate app"
                       >
-                        Send
-                      </button>
-                      <button
-                        onClick={() => sendMessage('chat')}
-                        disabled={!input.trim()}
-                        className="px-6 py-3 bg-slate-700 hover:bg-slate-600 disabled:opacity-50 disabled:cursor-not-allowed rounded-xl text-sm font-medium transition-colors"
-                        title="Chat-only (no file writes); plan or discuss before building"
-                      >
-                        Chat
+                        Generate
                       </button>
                     </>
                   )}
-
                 </div>
               </div>
             </div>
           </Pane>
         </div>
         <div className="col-span-8">
-          <Pane title={
-            <div className="flex items-center justify-between w-full">
-              <span>{viewMode === 'preview' ? 'Live Preview' : 'Code Editor'}</span>
-              <div className="flex bg-slate-700 rounded-lg p-1">
-                <button
-                  onClick={() => setViewMode('preview')}
-                  className={`px-3 py-1 text-xs rounded-md transition-colors ${
-                    viewMode === 'preview'
-                      ? 'bg-blue-600 text-white'
-                      : 'text-slate-300 hover:text-white'
-                  }`}
-                >
-                  Preview
-                </button>
-                <button
-                  onClick={() => setViewMode('code')}
-                  className={`px-3 py-1 text-xs rounded-md transition-colors ${
-                    viewMode === 'code'
-                      ? 'bg-blue-600 text-white'
-                      : 'text-slate-300 hover:text-white'
-                  }`}
-                >
-                  Code
-                </button>
+          <Pane title={(
+            <div className="flex items-center justify-between">
+              <span>{viewMode === 'preview' ? 'Live Preview' : 'Code Editor'}{currentAppId && (<span className="ml-2 text-xs text-slate-400">App: {currentAppId.slice(0,8)}</span>)}</span>
+              <div className="space-x-2">
+                <button onClick={() => setViewMode('preview')} className={`px-2 py-1 text-xs rounded ${viewMode==='preview'?'bg-blue-600':'bg-slate-700 hover:bg-slate-600'}`}>Preview</button>
+                <button onClick={() => setViewMode('code')} className={`px-2 py-1 text-xs rounded ${viewMode==='code'?'bg-blue-600':'bg-slate-700 hover:bg-slate-600'}`}>Code</button>
               </div>
             </div>
-          }>
-            <div className="p-4 h-full">
-              <div className="w-full h-full bg-slate-800/50 rounded-xl border border-slate-700/50 text-slate-200">
-                {viewMode === 'preview' ? (
-                  <GeneratedPreview previewUrl={previewUrl || undefined} currentAppId={currentAppId || undefined} />
-                ) : (
-                  <CodeEditor currentAppId={currentAppId} fileTree={fileTree} />
-                )}
-              </div>
-            </div>
+          )}>
+            {viewMode === 'preview' ? (
+              <GeneratedPreview previewUrl={previewUrl || undefined} currentAppId={currentAppId || undefined} />
+            ) : (
+              <CodeEditor
+                fileTree={fileTree}
+                currentAppId={currentAppId}
+                onRefreshTree={refreshTree}
+              />
+            )}
           </Pane>
         </div>
       </div>
+
+      {/* Apps Dashboard Overlay */}
+      {showApps && (
+        <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center">
+          <div className="bg-slate-900 border border-slate-700 rounded-lg w-[640px] max-h-[70vh] overflow-y-auto p-4 shadow-2xl">
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="text-sm font-medium text-slate-200">Local Apps</h3>
+              <button className="text-slate-400 hover:text-slate-200" onClick={() => setShowApps(false)}>✕</button>
+            </div>
+            <div className="space-y-2">
+              {appsList.length === 0 && (
+                <div className="text-slate-400 text-sm">No apps yet.</div>
+              )}
+              {appsList.map(a => (
+                <div key={a.appId} className="flex items-center justify-between bg-slate-800/60 hover:bg-slate-800 rounded p-2">
+                  <div>
+                    <div className="text-slate-100 text-sm">{a.name}</div>
+                    <div className="text-slate-400 text-xs">{a.appId.slice(0,8)} • {new Date(a.updatedAt).toLocaleString()}</div>
+                  </div>
+                  <button onClick={() => openApp(a.appId)} className="px-2 py-1 text-xs rounded bg-blue-600 hover:bg-blue-500">Open</button>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

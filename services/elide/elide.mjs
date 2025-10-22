@@ -2,16 +2,13 @@ import http from 'node:http';
 import { spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import Anthropic from '@anthropic-ai/sdk';
 import crypto from 'node:crypto';
-
-// Resolve project root relative to this file location
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const ROOT = path.resolve(__dirname, '..', '..');
-const GENERATED_APPS_DIR = path.join(ROOT, 'generated-apps');
+import { ROOT, GENERATED_APPS_DIR } from './lib/paths.mjs';
+import { readJSON } from './lib/body.mjs';
+import { buildAppContext, readTreeFromDir } from './lib/context.mjs';
+import { streamAppArchive } from './lib/zip.mjs';
 
 const PORT = Number(process.env.PORT_ELIDE || 8787);
 const PROVIDER = process.env.ELV_PROVIDER || 'openrouter';
@@ -127,6 +124,25 @@ const server = http.createServer(async (req, res) => {
     res.end(JSON.stringify({ url: previewUrl }));
     return;
   }
+  // Start (or restart) a specific app's preview
+  if (url.pathname === '/api/preview/start' && req.method === 'POST') {
+    try {
+      const { appId } = await readJSON(req, res);
+      if (!appId) { res.writeHead(400, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'Missing appId' })); return; }
+      const appDir = path.join(GENERATED_APPS_DIR, appId);
+      try { await fs.access(appDir); } catch { res.writeHead(404, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'App not found' })); return; }
+      await startElideApp(appId, appDir);
+      const appUrl = getAppUrl(appId);
+      const previewUrl = `${appUrl}?appId=${encodeURIComponent(appId)}&ts=${Date.now()}`;
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ url: previewUrl }));
+    } catch (e) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: e?.message || String(e) }));
+    }
+    return;
+  }
+
   if (url.pathname === '/api/files/tree' && req.method === 'GET') {
     const appId = url.searchParams.get('appId');
     if (appId) {
@@ -139,6 +155,45 @@ const server = http.createServer(async (req, res) => {
       const tree = await readTree();
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ tree }));
+    }
+    return;
+  }
+
+  // List all locally generated apps
+  if (url.pathname === '/api/apps' && req.method === 'GET') {
+    try {
+      await fs.mkdir(GENERATED_APPS_DIR, { recursive: true });
+      const entries = await fs.readdir(GENERATED_APPS_DIR, { withFileTypes: true });
+      const apps = [];
+      for (const ent of entries) {
+        if (!ent.isDirectory()) continue;
+        const appId = ent.name;
+        const appDir = path.join(GENERATED_APPS_DIR, appId);
+        let name = '';
+        // Try elide.pkl name
+        try {
+          const pkl = await fs.readFile(path.join(appDir, 'elide.pkl'), 'utf8');
+          const m = pkl.match(/\nname\s*=\s*"([^"]+)"/);
+          if (m) name = m[1];
+        } catch {}
+        // Try index.html <title>
+        if (!name) {
+          try {
+            const html = await fs.readFile(path.join(appDir, 'index.html'), 'utf8');
+            const m = html.match(/<title>([^<]+)<\/title>/i);
+            if (m) name = m[1];
+          } catch {}
+        }
+        const stat = await fs.stat(appDir).catch(() => null);
+        const updatedAt = stat?.mtimeMs || 0;
+        apps.push({ appId, name: name || appId.slice(0, 8), updatedAt });
+      }
+      apps.sort((a, b) => b.updatedAt - a.updatedAt);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ apps }));
+    } catch (e) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: e?.message || String(e) }));
     }
     return;
   }
@@ -318,33 +373,7 @@ const server = http.createServer(async (req, res) => {
     if (!appId) { res.writeHead(400); res.end('Missing appId'); return; }
     const appDir = path.join(GENERATED_APPS_DIR, appId);
     try { await fs.access(appDir); } catch { res.writeHead(404); res.end('App not found'); return; }
-
-    // Prefer "zip" CLI if available, otherwise fall back to tar.gz
-    const checkZip = spawn('bash', ['-lc', 'command -v zip >/dev/null 2>&1; echo $?']);
-    let codeStr = '';
-    checkZip.stdout.on('data', (d) => { codeStr += d.toString(); });
-    checkZip.on('close', (/*code*/) => {
-      const hasZip = codeStr.trim() === '0';
-      if (hasZip) {
-        res.writeHead(200, {
-          'Content-Type': 'application/zip',
-          'Content-Disposition': `attachment; filename="app-${appId}.zip"`
-        });
-        const z = spawn('bash', ['-lc', 'zip -r - .'], { cwd: appDir });
-        z.stdout.pipe(res);
-        z.stderr.on('data', (d) => process.stderr.write(`[export-zip] ${d}`));
-        z.on('close', () => res.end());
-      } else {
-        res.writeHead(200, {
-          'Content-Type': 'application/gzip',
-          'Content-Disposition': `attachment; filename="app-${appId}.tar.gz"`
-        });
-        const t = spawn('bash', ['-lc', 'tar -czf - .'], { cwd: appDir });
-        t.stdout.pipe(res);
-        t.stderr.on('data', (d) => process.stderr.write(`[export-tar] ${d}`));
-        t.on('close', () => res.end());
-      }
-    });
+    streamAppArchive(res, appDir, appId);
     return;
   }
 
@@ -1625,49 +1654,6 @@ async function stopAllElideApps() {
   nextPort = PREVIEW_PORT;
 }
 
-async function buildAppContext(appId, { maxFiles = 10, maxCharsPerFile = 400 } = {}) {
-  try {
-    const appDir = path.join(GENERATED_APPS_DIR, appId);
-    const tree = await readTreeFromDir(appDir, appDir);
-    const filePaths = [];
-    const walk = (nodes) => {
-      for (const n of nodes) {
-        if (n.type === 'file') filePaths.push(n.path);
-        if (n.children) walk(n.children);
-      }
-    };
-    walk(tree);
-    // rank files: entry points and recently edited likely first
-    const score = (p) => {
-      let s = 0;
-      if (/^index\.(html|tsx?|jsx?)$/i.test(p)) s += 100;
-      if (/^main\.(ts|js)x?$/i.test(p)) s += 80;
-      if (/^app\.(ts|js)x?$/i.test(p)) s += 70;
-      if (/^styles?\.(css|scss)$/i.test(p)) s += 60;
-      if (/^src\//i.test(p)) s += 50;
-      if (/components?\//i.test(p)) s += 40;
-      if (/\.css$/i.test(p)) s += 10;
-      if (/\.json$/i.test(p)) s -= 10;
-      return s;
-    };
-    filePaths.sort((a,b) => score(b) - score(a) || a.localeCompare(b));
-
-    const selected = filePaths.slice(0, maxFiles);
-    const parts = [];
-    for (const rel of selected) {
-      try {
-        const full = path.join(appDir, rel);
-        let content = await fs.readFile(full, 'utf8');
-        if (content.length > maxCharsPerFile) content = content.slice(0, maxCharsPerFile) + '...';
-        parts.push(`- ${rel}:\n${content}`);
-      } catch {}
-    }
-    return parts.join('\n\n');
-  } catch (e) {
-    console.warn('[ai] buildAppContext failed:', e?.message || e);
-    return '';
-  }
-}
 
 
 async function stopElideApp(appId) {
@@ -1694,34 +1680,6 @@ async function readAppTree(appId) {
   }
 }
 
-async function readTreeFromDir(dir, baseDir = path.join(GENERATED_APPS_DIR)) {
-  const tree = [];
-  try {
-    const entries = await fs.readdir(dir, { withFileTypes: true });
-    for (const entry of entries) {
-      if (entry.name.startsWith('.')) continue; // Skip hidden files
-
-      const fullPath = path.join(dir, entry.name);
-      const relativePath = path.relative(baseDir, fullPath);
-
-      if (entry.isDirectory()) {
-        tree.push({
-          path: relativePath,
-          type: 'dir',
-          children: await readTreeFromDir(fullPath, baseDir)
-        });
-      } else {
-        tree.push({
-          path: relativePath,
-          type: 'file'
-        });
-      }
-    }
-  } catch (error) {
-    console.error(`[elide] Failed to read directory ${dir}:`, error);
-  }
-  return tree;
-}
 
 async function readTree() {
   const entries = [];
@@ -1778,17 +1736,4 @@ server.listen(PORT, () => {
   console.log(`[elide] listening on http://localhost:${PORT} (provider: ${PROVIDER})`);
 });
 
-function readJSON(req, res) {
-  return new Promise((resolve) => {
-    let data = '';
-    req.on('data', (c) => (data += c));
-    req.on('end', () => {
-      try {
-        resolve(JSON.parse(data || '{}'));
-      } catch (e) {
-        resolve({});
-      }
-    });
-  });
-}
 
